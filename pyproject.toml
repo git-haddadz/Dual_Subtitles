@@ -1,0 +1,110 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dual-subtitles"
+version = "0.1.0"
+description = "Generate SRT and ASS dual-language subtitles from videos."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Dual Subtitles Maintainers" }]
+dependencies = [
+  "accelerate>=0.31",
+  "deep-translator>=1.11",
+  "moviepy>=1.0",
+  "numpy>=1.26",
+  "pydub>=0.25",
+  "pyannote.audio>=3.1",
+  "torch>=2.2",
+  "torchaudio>=2.2",
+  "torchvision>=0.17",
+  "transformers>=4.41",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.5",
+]
+
+[project.scripts]
+dual-subtitles = "dual_subtitles.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+src = ["src"]
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = [
+  "A",
+  "ARG",
+  "B",
+  "BLE",
+  "C4",
+  "D",
+  "E",
+  "F",
+  "I",
+  "N",
+  "PL",
+  "PT",
+  "RET",
+  "SIM",
+  "UP",
+  "W",
+]
+ignore = [
+  "D100",
+  "D104",
+  "D203",
+  "D213",
+  "PLC0415",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+extend-exclude = ".*\\.ipynb"
+
+[tool.isort]
+profile = "black"
+line_length = 88
+skip_glob = ["*.ipynb"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+strict = true
+exclude = [".*\\.ipynb$", "build", "dist", "tests"]
+
+[tool.pylint.main]
+ignore = ["tests"]
+ignore-patterns = [".*\\.ipynb$"]
+py-version = "3.11"
+init-hook = "import sys; sys.path.insert(0, 'src')"
+
+[tool.pylint.format]
+max-line-length = 88
+
+[tool.pylint.messages_control]
+disable = [
+  "broad-exception-caught",
+  "import-error",
+  "missing-class-docstring",
+  "missing-function-docstring",
+  "missing-module-docstring",
+  "import-outside-toplevel",
+  "too-few-public-methods",
+  "too-many-instance-attributes",
+  "too-many-locals",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

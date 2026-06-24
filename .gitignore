@@ -1,0 +1,27 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+build/
+dist/
+*.egg-info/
+tests/
+.flake8
+.bandit
+# Generated media and subtitle artifacts
+*.wav
+*.mp3
+*.mp4
+*.mkv
+*.mov
+*.srt
+*.ass
+outputs/
+videos/
+subtitles/
+tmp/
+temp/
