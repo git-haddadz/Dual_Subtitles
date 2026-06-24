@@ -68,12 +68,3 @@ Il reproduit le fonctionnement du notebook original:
 6. demande le token Hugging Face dans une cellule;
 7. traite les videos depuis `/content/drive/MyDrive/sous-titres`;
 8. ecrit les `.srt` et `.ass` dans ce meme dossier.
-
-## Verification
-
-Les controles de style et de typage se lancent avec l'image Docker locale:
-
-```bash
-docker run --rm -v "${PWD}:/work" -w /work python-dev-lint:latest check
-docker run --rm -v "${PWD}:/work" -w /work python-dev-lint:latest strict
-```
