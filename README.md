@@ -50,9 +50,6 @@ dual-subtitles process --input-dir ./videos --output-dir ./subtitles --no-ass
 dual-subtitles process --input-dir ./videos --output-dir ./subtitles --no-diarization
 ```
 
-Par defaut, la transcription est en arabe (`ar`) et la traduction vers l'anglais
-(`en`).
-
 ## Google Colab
 
 Utiliser le notebook
