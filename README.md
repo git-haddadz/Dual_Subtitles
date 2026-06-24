@@ -55,6 +55,9 @@ dual-subtitles process --input-dir ./videos --output-dir ./subtitles --no-diariz
 Utiliser le notebook
 [subtitles_gen.ipynb](subtitles_gen.ipynb).
 
+Lien direct:
+[ouvrir dans Google Colab](https://colab.research.google.com/github/git-haddadz/Dual_Subtitles/blob/master/subtitles_gen.ipynb).
+
 Il reproduit le fonctionnement du notebook original:
 
 1. monte Google Drive des le debut;
