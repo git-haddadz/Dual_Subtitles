@@ -1,7 +1,4 @@
 # Dual Subtitles
-
-## Example
-
 <p align="center">
   <img src="docs/images/example-1.png" width="49%" alt="Example 1">
   <img src="docs/images/example-2.png" width="49%" alt="Example 2">
