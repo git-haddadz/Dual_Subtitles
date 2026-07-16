@@ -59,38 +59,45 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.command == "process":
-        temp_dir = args.temp_dir or Path(tempfile.mkdtemp(prefix="dual-subtitles-"))
-        config = ProcessingConfig(
-            input_dir=args.input_dir,
-            output_dir=args.output_dir,
-            temp_dir=temp_dir,
-            transcription_language=args.transcription_language,
-            translation_source_language=args.translation_source_language,
-            translation_target_language=args.translation_target_language,
-            whisper_model=args.whisper_model,
-            diarization_model=args.diarization_model,
-            min_speech_duration=args.min_speech_duration,
-            merge_gap=args.merge_gap,
-            max_speech_duration=args.max_speech_duration,
-            subtitle_gap_threshold=args.subtitle_gap_threshold,
-            max_subtitle_duration=args.max_subtitle_duration,
-            transcription_padding=args.transcription_padding,
-            max_words_per_subtitle=args.max_words_per_subtitle,
-            line_break_words=args.line_break_words,
-            generate_srt=not args.no_srt,
-            generate_ass=not args.no_ass,
-            skip_existing=not args.no_skip_existing,
-            use_diarization=not args.no_diarization,
-            video_extension=args.extension,
-            device=_parse_device(args.device),
-        )
-        generated = process_directory(config)
-        for path in generated:
-            print(path)
-        return 0
+        if args.temp_dir is not None:
+            return _process(args, args.temp_dir)
+        with tempfile.TemporaryDirectory(prefix="dual-subtitles-") as temp_dir:
+            return _process(args, Path(temp_dir))
 
     parser.error(f"Unsupported command: {args.command}")
     return 2
+
+
+def _process(args: argparse.Namespace, temp_dir: Path) -> int:
+    """Build the processing configuration and run one CLI batch."""
+    config = ProcessingConfig(
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        temp_dir=temp_dir,
+        transcription_language=args.transcription_language,
+        translation_source_language=args.translation_source_language,
+        translation_target_language=args.translation_target_language,
+        whisper_model=args.whisper_model,
+        diarization_model=args.diarization_model,
+        min_speech_duration=args.min_speech_duration,
+        merge_gap=args.merge_gap,
+        max_speech_duration=args.max_speech_duration,
+        subtitle_gap_threshold=args.subtitle_gap_threshold,
+        max_subtitle_duration=args.max_subtitle_duration,
+        transcription_padding=args.transcription_padding,
+        max_words_per_subtitle=args.max_words_per_subtitle,
+        line_break_words=args.line_break_words,
+        generate_srt=not args.no_srt,
+        generate_ass=not args.no_ass,
+        skip_existing=not args.no_skip_existing,
+        use_diarization=not args.no_diarization,
+        video_extension=args.extension,
+        device=_parse_device(args.device),
+    )
+    generated = process_directory(config)
+    for path in generated:
+        print(path)
+    return 0
 
 
 def _parse_device(value: str | None) -> int | str | None:

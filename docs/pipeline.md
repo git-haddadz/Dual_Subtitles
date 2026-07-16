@@ -133,6 +133,10 @@ Fonctions principales:
 8. ecrire `.srt`;
 9. ecrire `.ass`.
 
+Avant de charger Whisper ou pyannote, `process_directory(...)` verifie les
+sorties deja presentes. Une video deja terminee ne charge donc aucun modele.
+Les erreurs sont isolees par video afin que le reste du dossier continue.
+
 ## 4. Modeles De Donnees
 
 Fichier: `src/dual_subtitles/models/subtitle.py`
@@ -176,8 +180,10 @@ est activee.
 `transcription.py` charge Whisper via `transformers.pipeline` et retourne des
 `SubtitleSegment` timestamps.
 
-`translation.py` utilise `deep-translator` pour construire la ligne traduite des
-fichiers ASS.
+`translation.py` utilise `deep-translator` pour traduire litteralement chaque
+mot arabe vers l'anglais. La seconde ligne place les traductions dans l'ordre
+visuel inverse afin de suivre de gauche a droite les mots arabes affiches de
+droite a gauche. Les traductions sont mises en cache par mot.
 
 ## 7. Segmentation Et Nettoyage
 
@@ -192,6 +198,10 @@ Regroupe les anciennes constantes et boucles du notebook:
 - correction des chevauchements;
 - fusion de petits chunks Whisper;
 - ajout de retours ligne dans les sous-titres longs.
+- suppression des mots dupliques aux frontieres des chunks avec padding.
+
+Lors de l'ecriture ASS, les retours ligne physiques sont convertis en `\\N` et
+les accolades sont neutralisees pour ne pas creer de balises ASS involontaires.
 
 ## 8. Timestamps
 

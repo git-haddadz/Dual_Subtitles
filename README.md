@@ -3,7 +3,7 @@
 Dual Subtitles genere des sous-titres a partir de videos `.mp4`:
 
 - `.srt` avec transcription Whisper;
-- `.ass` avec texte source et traduction interlineaire;
+- `.ass` avec chaque mot source au-dessus de sa traduction litterale anglaise;
 - diarisation optionnelle des locuteurs avec pyannote.
 
 Le pipeline est documente etape par etape dans
@@ -49,6 +49,24 @@ Options utiles:
 dual-subtitles process --input-dir ./videos --output-dir ./subtitles --no-ass
 dual-subtitles process --input-dir ./videos --output-dir ./subtitles --no-diarization
 ```
+
+Les modeles ne sont charges que si une sortie doit etre generee. Lorsqu'aucun
+`--temp-dir` n'est fourni, le dossier temporaire est supprime automatiquement a
+la fin du traitement. L'echec d'une video est journalise sans interrompre les
+autres videos du dossier.
+
+## Developpement
+
+```bash
+pip install -e ".[dev]"
+ruff check src tests
+ruff format --check src tests
+pytest
+```
+
+Le fichier `notebook.ipynb` est conserve comme prototype historique
+Vosk/Wav2Vec. Le runner maintenu pour le pipeline actuel est
+`subtitles_gen.ipynb`.
 
 ## Google Colab
 

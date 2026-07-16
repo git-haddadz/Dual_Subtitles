@@ -15,6 +15,13 @@ from dual_subtitles.utils.timestamps import (
 MIN_SRT_BLOCK_LINES = 3
 
 
+def _normalize_ass_text(text: str) -> str:
+    """Keep an ASS event on one physical line and neutralize override tags."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = normalized.replace("\n", r"\N")
+    return normalized.replace("{", r"\{").replace("}", r"\}")
+
+
 def build_srt(segments: Iterable[SubtitleSegment]) -> str:
     """Build SRT content from subtitle segments."""
     blocks = []
@@ -83,7 +90,7 @@ def build_ass(
             continue
         start = format_ass_timestamp(segment.start)
         end = format_ass_timestamp(segment.end)
-        text = translator.interlinear(segment.text)
+        text = _normalize_ass_text(translator.interlinear(segment.text))
         events.append(f"Dialogue: 0,{start},{end},Interlinear,,0,0,0,,{text}")
 
     return header + "\n".join(events) + ("\n" if events else "")

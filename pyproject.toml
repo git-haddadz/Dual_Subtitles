@@ -11,20 +11,26 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Dual Subtitles Maintainers" }]
 dependencies = [
-  "accelerate>=0.31",
-  "deep-translator>=1.11",
-  "moviepy>=1.0",
-  "numpy>=1.26",
-  "pydub>=0.25",
-  "pyannote.audio>=3.1",
-  "torch>=2.2",
-  "torchaudio>=2.2",
-  "torchvision>=0.17",
-  "transformers>=4.41",
+  "accelerate==1.14.0",
+  "deep-translator==1.11.4",
+  "huggingface_hub==0.36.2",
+  "moviepy==1.0.3",
+  "numpy==1.26.4",
+  "pandas==2.2.2",
+  "pydub==0.25.1",
+  "pyannote.audio==3.1.1",
+  "scipy==1.11.4",
+  "tokenizers==0.19.1",
+  "torch==2.2.2",
+  "torchaudio==2.2.2",
+  "torchvision==0.17.2",
+  "transformers==4.41.2",
 ]
 
 [project.optional-dependencies]
 dev = [
+  "mypy>=1.10",
+  "pytest>=8.2",
   "ruff>=0.5",
 ]
 
@@ -67,6 +73,9 @@ ignore = [
   "PLC0415",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D"]
+
 [tool.black]
 line-length = 88
 target-version = ["py311"]
@@ -81,10 +90,9 @@ skip_glob = ["*.ipynb"]
 python_version = "3.11"
 ignore_missing_imports = true
 strict = true
-exclude = [".*\\.ipynb$", "build", "dist", "tests"]
+exclude = [".*\\.ipynb$", "build", "dist"]
 
 [tool.pylint.main]
-ignore = ["tests"]
 ignore-patterns = [".*\\.ipynb$"]
 py-version = "3.11"
 init-hook = "import sys; sys.path.insert(0, 'src')"

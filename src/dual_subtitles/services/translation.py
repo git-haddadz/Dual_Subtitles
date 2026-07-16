@@ -6,6 +6,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from dual_subtitles.core.segmentation import deduplicate_overlap
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -18,7 +20,7 @@ class TranslatorClient(Protocol):
 
 @dataclass(slots=True)
 class InterlinearGoogleTranslator:
-    """Build word-aligned interlinear text using deep-translator."""
+    """Build word-by-word interlinear ASS text using deep-translator."""
 
     source_language: str = "ar"
     target_language: str = "en"
@@ -38,30 +40,15 @@ class InterlinearGoogleTranslator:
         )
 
     def interlinear(self, text: str) -> str:
-        """Return source text plus a translated second line for ASS."""
-        words = text.split()
-        translated_words = self._translate_words(text, words)
-        return text + r"\N" + " ".join(translated_words)
+        """Return source text above literal translations in visual RTL order."""
+        source = " ".join(text.split())
+        translated_words = [self._translate_word(word) for word in source.split()]
+        return source + r"\N" + " ".join(reversed(translated_words))
 
-    def _translate_words(self, text: str, words: list[str]) -> list[str]:
-        full_translation = self._safe_translate(text)
-        full_words = full_translation.split() if full_translation else []
-        translated_words: list[str] = []
-
-        for index, word in enumerate(words):
-            if word in self.cache:
-                translated_words.append(self.cache[word])
-                continue
-
-            if index < len(full_words):
-                translated_word = full_words[index]
-            else:
-                translated_word = self._safe_translate(word) or word
-
-            self.cache[word] = translated_word
-            translated_words.append(translated_word)
-
-        return translated_words
+    def _translate_word(self, word: str) -> str:
+        if word not in self.cache:
+            self.cache[word] = self._safe_translate(word) or word
+        return self.cache[word]
 
     def _safe_translate(self, text: str) -> str:
         if self.client is None:
@@ -74,12 +61,4 @@ class InterlinearGoogleTranslator:
             return ""
 
 
-def deduplicate_overlap(previous: str, new: str, *, max_overlap: int = 5) -> str:
-    """Remove duplicated word overlap between two subtitle fragments."""
-    previous_words = previous.split()
-    new_words = new.split()
-    overlap = min(len(previous_words), len(new_words), max_overlap)
-    for size in range(overlap, 0, -1):
-        if previous_words[-size:] == new_words[:size]:
-            return " ".join(new_words[size:])
-    return " ".join(new_words)
+__all__ = ["InterlinearGoogleTranslator", "TranslatorClient", "deduplicate_overlap"]

@@ -9,7 +9,6 @@ __pycache__/
 build/
 dist/
 *.egg-info/
-tests/
 .flake8
 .bandit
 # Generated media and subtitle artifacts

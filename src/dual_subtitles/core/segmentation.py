@@ -104,13 +104,14 @@ def merge_subtitle_segments(
             continue
 
         gap = segment.start - current.end
-        duration = current.end - current.start
+        projected_duration = segment.end - current.start
+        projected_words = len(f"{current.text} {segment.text}".split())
         should_start_new = (
             gap > gap_threshold
-            or duration > max_duration
+            or projected_duration > max_duration
             or current.speaker != segment.speaker
             or current.text.endswith(SENTENCE_ENDINGS)
-            or len(current.text.split()) > max_words
+            or projected_words > max_words
         )
 
         if should_start_new:
@@ -149,3 +150,14 @@ def add_line_breaks(
         formatted.append(replace(segment, text=text))
 
     return formatted
+
+
+def deduplicate_overlap(previous: str, new: str, *, max_overlap: int = 5) -> str:
+    """Remove duplicated word overlap between adjacent transcript fragments."""
+    previous_words = previous.split()
+    new_words = new.split()
+    overlap = min(len(previous_words), len(new_words), max_overlap)
+    for size in range(overlap, 0, -1):
+        if previous_words[-size:] == new_words[:size]:
+            return " ".join(new_words[size:])
+    return " ".join(new_words)
