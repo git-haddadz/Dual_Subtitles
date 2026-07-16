@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from dual_subtitles.utils.timestamps import (
 )
 
 MIN_SRT_BLOCK_LINES = 3
+LOGGER = logging.getLogger(__name__)
 
 
 def _normalize_ass_text(text: str) -> str:
@@ -84,10 +86,19 @@ def build_ass(
         "Effect,Text\n"
     )
 
+    segment_list = list(segments)
+    total_segments = len(segment_list)
     events = []
-    for segment in segments:
+    for index, segment in enumerate(segment_list, start=1):
         if not segment.text.strip():
             continue
+        progress = round(index / total_segments * 100)
+        LOGGER.info(
+            "ASS translation %s/%s (%s%%)",
+            index,
+            total_segments,
+            progress,
+        )
         start = format_ass_timestamp(segment.start)
         end = format_ass_timestamp(segment.end)
         text = _normalize_ass_text(translator.interlinear(segment.text))

@@ -68,6 +68,12 @@ Ordre des cellules:
 Ce choix evite de recloner le repo dans `/content`, qui disparait a chaque
 runtime Colab.
 
+La cellule d'installation compare les versions reellement installees aux
+versions attendues. Si l'environnement doit etre modifie, elle installe les
+dependances puis redemarre automatiquement le processus Colab. Au passage
+suivant, les versions correspondent et l'installation est ignoree, sans
+dependre d'un fichier temporaire qui pourrait disparaitre au redemarrage.
+
 ### Gestion Du Token Et De L'environnement
 
 Le notebook ne lit pas `.env.example` et ne cree pas de fichier `.env`.
@@ -136,6 +142,12 @@ Fonctions principales:
 Avant de charger Whisper ou pyannote, `process_directory(...)` verifie les
 sorties deja presentes. Une video deja terminee ne charge donc aucun modele.
 Les erreurs sont isolees par video afin que le reste du dossier continue.
+Un callback optionnel est appele immediatement apres chaque video. Le notebook
+l'utilise pour afficher les sorties disponibles sans attendre la fin du lot et
+accepte une limite de videos pour les essais rapides.
+Les etapes audio, diarisation, transcription, preparation et ecriture sont
+journalisees. La transcription et la traduction ASS affichent le numero du
+segment et leur pourcentage d'avancement.
 
 ## 4. Modeles De Donnees
 
@@ -179,6 +191,10 @@ est activee.
 
 `transcription.py` charge Whisper via `transformers.pipeline` et retourne des
 `SubtitleSegment` timestamps.
+
+Lorsqu'un GPU CUDA est disponible, Whisper charge ses poids en `float16` et le
+pipeline pyannote est explicitement deplace sur le meme GPU. La configuration
+`device=0` du notebook selectionne le premier GPU Colab.
 
 `translation.py` utilise `deep-translator` pour traduire litteralement chaque
 mot arabe vers l'anglais. La seconde ligne place les traductions dans l'ordre

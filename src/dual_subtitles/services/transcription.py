@@ -25,11 +25,15 @@ class WhisperTranscriber:
         device = self.device
         if device is None:
             device = 0 if torch.cuda.is_available() else -1
+        uses_cuda = torch.cuda.is_available() and device not in {-1, "cpu"}
+        torch_dtype = torch.float16 if uses_cuda else torch.float32
 
         self._pipeline = pipeline(
             "automatic-speech-recognition",
             model=self.model_name,
             device=device,
+            torch_dtype=torch_dtype,
+            model_kwargs={"low_cpu_mem_usage": True},
             return_timestamps=True,
         )
 

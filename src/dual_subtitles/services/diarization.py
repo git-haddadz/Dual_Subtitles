@@ -20,6 +20,7 @@ class PyannoteDiarizer:
 
     model_name: str = "pyannote/speaker-diarization-3.1"
     token_env_var: str = "HUGGINGFACE_TOKEN"
+    device: int | str | None = None
     _pipeline: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -33,12 +34,26 @@ class PyannoteDiarizer:
             )
             raise MissingHuggingFaceTokenError(msg)
 
+        import torch
         from pyannote.audio import Pipeline
 
         self._pipeline = Pipeline.from_pretrained(
             self.model_name,
             use_auth_token=token,
         )
+        target_device = self._resolve_device(torch)
+        if target_device.type == "cuda":
+            self._pipeline.to(target_device)
+
+    def _resolve_device(self, torch: Any) -> Any:
+        """Resolve the configured pyannote execution device."""
+        if self.device is None:
+            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if isinstance(self.device, int):
+            if self.device < 0:
+                return torch.device("cpu")
+            return torch.device(f"cuda:{self.device}")
+        return torch.device(self.device)
 
     def detect(self, audio_path: Path) -> list[Segment]:
         """Detect speaker turns in an audio file."""

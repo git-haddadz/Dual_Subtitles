@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,7 @@ from dual_subtitles.services.translation import InterlinearGoogleTranslator
 
 LOGGER = logging.getLogger(__name__)
 MIN_TRANSCRIBABLE_DURATION = 0.3
+VideoCompleteCallback = Callable[[Path, list[Path], Exception | None], None]
 
 
 def discover_videos(input_dir: Path, extension: str) -> list[Path]:
@@ -38,7 +39,12 @@ def discover_videos(input_dir: Path, extension: str) -> list[Path]:
     )
 
 
-def process_directory(config: ProcessingConfig) -> list[Path]:
+def process_directory(
+    config: ProcessingConfig,
+    *,
+    video_limit: int | None = None,
+    on_video_complete: VideoCompleteCallback | None = None,
+) -> list[Path]:
     """Process all matching videos in a directory."""
     if not config.input_dir.is_dir():
         msg = f"Input directory does not exist: {config.input_dir}"
@@ -47,6 +53,11 @@ def process_directory(config: ProcessingConfig) -> list[Path]:
     config.output_dir.mkdir(parents=True, exist_ok=True)
     config.temp_dir.mkdir(parents=True, exist_ok=True)
     videos = discover_videos(config.input_dir, config.normalized_extension())
+    if video_limit is not None:
+        if video_limit <= 0:
+            msg = "video_limit must be greater than zero or None."
+            raise ValueError(msg)
+        videos = videos[:video_limit]
     if not videos:
         LOGGER.warning(
             "No %s files found in %s",
@@ -62,6 +73,8 @@ def process_directory(config: ProcessingConfig) -> list[Path]:
     generated_files: list[Path] = []
     for index, video_path in enumerate(videos, start=1):
         LOGGER.info("[%s/%s] Processing %s", index, len(videos), video_path.name)
+        video_outputs: list[Path] = []
+        error: Exception | None = None
         try:
             if _needs_transcription(video_path, config):
                 if transcriber is None:
@@ -70,7 +83,10 @@ def process_directory(config: ProcessingConfig) -> list[Path]:
                         device=config.device,
                     )
                 if config.use_diarization and diarizer is None:
-                    diarizer = PyannoteDiarizer(config.diarization_model)
+                    diarizer = PyannoteDiarizer(
+                        config.diarization_model,
+                        device=config.device,
+                    )
 
             if _needs_translation(video_path, config) and translator is None:
                 translator = InterlinearGoogleTranslator(
@@ -78,17 +94,19 @@ def process_directory(config: ProcessingConfig) -> list[Path]:
                     target_language=config.translation_target_language,
                 )
 
-            generated_files.extend(
-                process_video(
-                    video_path,
-                    config=config,
-                    transcriber=transcriber,
-                    diarizer=diarizer,
-                    translator=translator,
-                )
+            video_outputs = process_video(
+                video_path,
+                config=config,
+                transcriber=transcriber,
+                diarizer=diarizer,
+                translator=translator,
             )
-        except Exception:  # noqa: BLE001 - one bad video must not stop the batch.
+            generated_files.extend(video_outputs)
+        except Exception as exc:  # noqa: BLE001 - isolate failures per video.
+            error = exc
             LOGGER.exception("Failed to process %s", video_path)
+        if on_video_complete is not None:
+            on_video_complete(video_path, video_outputs, error)
     return generated_files
 
 
@@ -170,7 +188,9 @@ def process_video(  # noqa: PLR0912, PLR0915 - keep orchestration cleanup togeth
     audio_path = config.temp_dir / f"{video_path.stem}.wav"
     chunk_path = config.temp_dir / f"{video_path.stem}.chunk.wav"
     try:
+        LOGGER.info("Step 1/6 - Extracting audio from %s", video_path.name)
         extract_audio(video_path, audio_path)
+        LOGGER.info("Step 2/6 - Normalizing audio to mono 16 kHz")
         normalize_audio(audio_path, audio_path)
         audio = load_audio(audio_path)
 
@@ -178,8 +198,10 @@ def process_video(  # noqa: PLR0912, PLR0915 - keep orchestration cleanup togeth
             if diarizer is None:
                 msg = "Diarization is enabled but no diarizer was provided."
                 raise ValueError(msg)
+            LOGGER.info("Step 3/6 - Detecting speakers")
             speech_segments = diarizer.detect(audio_path)
         else:
+            LOGGER.info("Step 3/6 - Using a single speaker segment")
             duration_seconds = len(audio) / 1000
             speech_segments = SingleSpeakerDiarizer().detect_duration(duration_seconds)
 
@@ -188,6 +210,7 @@ def process_video(  # noqa: PLR0912, PLR0915 - keep orchestration cleanup togeth
         if not speech_segments:
             return []
 
+        LOGGER.info("Step 4/6 - Transcribing speech segments")
         transcribed = transcribe_segments(
             speech_segments,
             audio=audio,
@@ -195,16 +218,20 @@ def process_video(  # noqa: PLR0912, PLR0915 - keep orchestration cleanup togeth
             transcriber=transcriber,
             temp_chunk=chunk_path,
         )
+        LOGGER.info("Step 5/6 - Preparing readable subtitles")
         subtitles = prepare_subtitles(transcribed, config=config)
         LOGGER.info("Final subtitle segments: %s", len(subtitles))
 
+        LOGGER.info("Step 6/6 - Writing subtitle files")
         generated_files: list[Path] = []
         if config.generate_srt:
             write_srt(srt_path, subtitles)
+            LOGGER.info("SRT ready: %s", srt_path)
             generated_files.append(srt_path)
         if config.generate_ass:
             assert translator is not None
             write_ass(ass_path, subtitles, translator)
+            LOGGER.info("ASS ready: %s", ass_path)
             generated_files.append(ass_path)
         return generated_files
     finally:
@@ -252,10 +279,28 @@ def transcribe_segments(
 ) -> list[SubtitleSegment]:
     """Transcribe prepared speech segments."""
     transcribed: list[SubtitleSegment] = []
+    segment_list = list(segments)
+    total_segments = len(segment_list)
     temp_chunk = temp_chunk or config.temp_dir / "chunk.wav"
-    for segment in segments:
+    for index, segment in enumerate(segment_list, start=1):
         if segment.duration < MIN_TRANSCRIBABLE_DURATION:
+            LOGGER.info(
+                "Transcription %s/%s - skipped short segment",
+                index,
+                total_segments,
+            )
             continue
+
+        progress = round(index / total_segments * 100)
+        LOGGER.info(
+            "Transcription %s/%s (%s%%) - %.1fs to %.1fs - %s",
+            index,
+            total_segments,
+            progress,
+            segment.start,
+            segment.end,
+            segment.speaker,
+        )
 
         start_ms = max(0, int((segment.start - config.transcription_padding) * 1000))
         end_ms = int((segment.end + config.transcription_padding) * 1000)
