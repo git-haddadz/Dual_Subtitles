@@ -30,8 +30,19 @@ class SubtitleSegment:
     speaker: str = "SPEAKER_00"
 
 
+@dataclass(frozen=True, slots=True)
+class WordPair:
+    """A source word and its literal translated gloss."""
+
+    source: str
+    translation: str
+
+
 class InterlinearTranslator(Protocol):
     """Protocol for objects that build ASS interlinear text."""
 
     def interlinear(self, text: str) -> str:
         """Return subtitle text with translated text on a second ASS line."""
+
+    def word_pairs(self, text: str) -> list[WordPair]:
+        """Return source words paired with their literal translations."""

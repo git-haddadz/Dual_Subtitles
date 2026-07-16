@@ -1,6 +1,6 @@
 """Tools for generating dual-language subtitles from videos."""
 
 from dual_subtitles.core.config import ProcessingConfig
-from dual_subtitles.models.subtitle import Segment, SubtitleSegment
+from dual_subtitles.models.subtitle import Segment, SubtitleSegment, WordPair
 
-__all__ = ["ProcessingConfig", "Segment", "SubtitleSegment"]
+__all__ = ["ProcessingConfig", "Segment", "SubtitleSegment", "WordPair"]

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from dual_subtitles.core.segmentation import deduplicate_overlap
+from dual_subtitles.models.subtitle import WordPair
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,9 +42,18 @@ class InterlinearGoogleTranslator:
 
     def interlinear(self, text: str) -> str:
         """Return source text above literal translations in visual RTL order."""
-        source = " ".join(text.split())
-        translated_words = [self._translate_word(word) for word in source.split()]
-        return source + r"\N" + " ".join(reversed(translated_words))
+        pairs = self.word_pairs(text)
+        source = " ".join(pair.source for pair in pairs)
+        translations = " ".join(pair.translation for pair in reversed(pairs))
+        return source + r"\N" + translations
+
+    def word_pairs(self, text: str) -> list[WordPair]:
+        """Translate every source word independently and preserve pairing."""
+        source_words = text.split()
+        return [
+            WordPair(source=word, translation=self._translate_word(word))
+            for word in source_words
+        ]
 
     def _translate_word(self, word: str) -> str:
         if word not in self.cache:
