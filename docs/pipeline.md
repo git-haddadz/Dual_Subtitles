@@ -1,253 +1,258 @@
 # Pipeline Dual Subtitles
 
-Ce document explique la structure actuelle du projet et le chemin complet suivi
-par une video, dans le meme ordre que l'ancien notebook Colab.
+Ce document decrit le parcours complet d'une video, depuis sa decouverte
+jusqu'a la generation des fichiers SRT et ASS.
 
-## Structure Des Dossiers
+## Vue D'ensemble
 
 ```text
-Dual_Subtitles/
-├── src/
-│   └── dual_subtitles/
-│       ├── __init__.py
-│       ├── main.py
-│       ├── cli.py
-│       ├── core/
-│       │   ├── __init__.py
-│       │   ├── config.py
-│       │   ├── pipeline.py
-│       │   └── segmentation.py
-│       ├── models/
-│       │   ├── __init__.py
-│       │   └── subtitle.py
-│       ├── io/
-│       │   ├── __init__.py
-│       │   ├── audio.py
-│       │   └── subtitle_files.py
-│       ├── services/
-│       │   ├── __init__.py
-│       │   ├── diarization.py
-│       │   ├── transcription.py
-│       │   └── translation.py
-│       └── utils/
-│           ├── __init__.py
-│           └── timestamps.py
+Video MP4
+  -> extraction et normalisation audio
+  -> diarisation des locuteurs
+  -> segmentation des zones de parole
+  -> transcription Whisper
+  -> nettoyage et regroupement
+  -> traduction litterale mot a mot
+  -> ecriture SRT et rendu ASS interlineaire
 ```
 
-## Sens Des Noms
+Le notebook Colab et la CLI appellent le meme package Python. La logique metier
+n'est pas dupliquee dans le notebook.
 
-- `core`: logique centrale du pipeline. Ce dossier contient ce qui decide
-  l'ordre des etapes, les regles de segmentation et la configuration.
-- `models`: objets de donnees simples. Ils decrivent les informations qui
-  circulent dans le pipeline, sans appeler Whisper, pyannote ou le disque.
-- `io`: entrees/sorties. Ce dossier lit ou ecrit des fichiers: audio, SRT, ASS.
-- `services`: wrappers autour de dependances externes. C'est ici que le code
-  parle a pyannote, Whisper/Transformers ou Google Translate.
-- `utils`: fonctions generiques sans etat metier fort, comme le formatage des
-  timestamps.
-- `cli.py`: interface en ligne de commande pour lancer le pipeline en local.
-- `main.py`: point d'entree executable qui appelle la CLI.
+## 1. Configuration
 
-## 1. Notebook Colab
+La classe `ProcessingConfig`, dans
+`src/dual_subtitles/core/config.py`, centralise:
 
-Fichier: `subtitles_gen.ipynb`
+- les dossiers d'entree, de sortie et de travail temporaire;
+- les langues de transcription, source et cible;
+- les modeles Whisper et pyannote;
+- les seuils de segmentation, de fusion et de padding;
+- la taille maximale des segments et sous-titres;
+- l'activation des sorties SRT, ASS et de la diarisation;
+- le peripherique d'execution CPU ou GPU.
 
-Le notebook est un runner Colab. Il ne contient plus la logique metier: il
-prepare l'environnement et appelle le package Python.
+La configuration refuse les valeurs negatives, les limites nulles et une
+execution dans laquelle les sorties SRT et ASS seraient toutes les deux
+desactivees.
 
-Ordre des cellules:
+## 2. Decouverte, Reprise Et Traitement Par Lot
 
-1. monter Google Drive;
-2. utiliser `/content/drive/MyDrive/Dual_Subtitles` comme dossier du repo;
-3. faire `git pull` si le repo existe deja dans Drive;
-4. faire `git clone` uniquement si le repo n'existe pas encore;
-5. installer `ffmpeg`, `requirements.txt` et le package local;
-6. demander le token Hugging Face;
-7. traiter les videos de `/content/drive/MyDrive/sous-titres`.
+`process_directory(...)`, dans `src/dual_subtitles/core/pipeline.py`:
 
-Ce choix evite de recloner le repo dans `/content`, qui disparait a chaque
-runtime Colab.
+1. verifie le dossier d'entree;
+2. decouvre les fichiers correspondant a l'extension configuree;
+3. trie les videos par nom;
+4. determine les sorties encore necessaires;
+5. charge les services lourds uniquement au premier besoin;
+6. traite les videos l'une apres l'autre.
 
-La cellule d'installation compare les versions reellement installees aux
-versions attendues. Si l'environnement doit etre modifie, elle installe les
-dependances puis redemarre automatiquement le processus Colab. Au passage
-suivant, les versions correspondent et l'installation est ignoree, sans
-dependre d'un fichier temporaire qui pourrait disparaitre au redemarrage.
+Une limite optionnelle permet de ne traiter que les premieres videos pendant un
+essai. Un callback peut egalement etre appele apres chaque video avec:
 
-### Gestion Du Token Et De L'environnement
+- le chemin de la video;
+- les sorties disponibles;
+- l'erreur eventuelle.
 
-Le notebook ne lit pas `.env.example` et ne cree pas de fichier `.env`.
+### Reutilisation Des Sorties
 
-Dans Colab, le token Hugging Face est demande dans une cellule avec
-`getpass.getpass(...)`, puis place uniquement dans la variable d'environnement
-du runtime:
+Lorsque `skip_existing` est active:
 
-```python
-os.environ["HUGGINGFACE_TOKEN"] = hf_token
-```
+- une sortie demandee deja presente et non vide est conservee;
+- si le SRT existe mais que l'ASS manque, le SRT est relu pour regenerer
+  uniquement l'ASS;
+- Whisper et pyannote ne sont pas charges si aucune retranscription n'est
+  necessaire.
 
-Ensuite, `PyannoteDiarizer` lit cette variable depuis
-`src/dual_subtitles/services/diarization.py`. Le token reste donc en memoire
-pendant la session Colab, mais il n'est pas ecrit dans Google Drive, pas ajoute
-au repo et pas stocke dans le notebook.
+Chaque erreur est journalisee sans interrompre les videos suivantes.
 
-Le fichier `.env.example` est seulement un modele pour l'execution locale. Il
-montre le nom attendu de la variable:
+## 3. Extraction Et Normalisation Audio
 
-```env
-HUGGINGFACE_TOKEN=your_token_here
-```
+`src/dual_subtitles/io/audio.py` assure:
 
-Pour utiliser un vrai `.env` local, il faudrait soit l'exporter manuellement
-dans le shell, soit ajouter une dependance comme `python-dotenv`. Le projet ne
-charge pas automatiquement `.env` aujourd'hui.
+- l'extraction de la piste audio avec MoviePy et ffmpeg;
+- la conversion en WAV;
+- la normalisation en mono 16 kHz avec pydub;
+- le chargement de l'audio pour le decoupage des chunks.
 
-## 2. Configuration
+Les fichiers WAV et chunks temporaires sont supprimes apres chaque video, y
+compris lorsqu'une etape echoue.
 
-Fichier: `src/dual_subtitles/core/config.py`
+## 4. Diarisation
 
-`ProcessingConfig` remplace les variables globales de l'ancien notebook:
+`src/dual_subtitles/services/diarization.py` encapsule pyannote.
 
-- dossiers d'entree, sortie et temporaire;
-- langues de transcription et traduction;
-- modeles Whisper et pyannote;
-- seuils de segmentation, fusion et padding;
-- activation SRT, ASS et diarisation.
+Lorsque la diarisation est activee:
 
-## 3. Orchestration
+1. `PyannoteDiarizer` lit `HUGGINGFACE_TOKEN`;
+2. le pipeline `pyannote/speaker-diarization-3.1` est charge;
+3. les tours de parole sont convertis en objets `Segment`;
+4. le pipeline pyannote est deplace sur CUDA lorsqu'un GPU est selectionne.
 
-Fichier: `src/dual_subtitles/core/pipeline.py`
+Sans diarisation, `SingleSpeakerDiarizer` cree un segment couvrant toute la
+duree de l'audio.
 
-Fonctions principales:
+Le token Hugging Face est lu depuis l'environnement. Il n'est ni ecrit dans les
+sous-titres ni conserve par le package.
 
-- `discover_videos(...)`: trouve les videos `.mp4`;
-- `process_directory(...)`: charge les services une fois et traite chaque video;
-- `process_video(...)`: remplace la grande boucle du notebook;
-- `prepare_speech_segments(...)`: applique les regles de parole;
-- `prepare_subtitles(...)`: nettoie et fusionne les sous-titres;
-- `transcribe_segments(...)`: coupe les chunks audio et appelle Whisper.
+## 5. Segmentation Et Transcription
 
-`process_video(...)` suit cette sequence:
-
-1. definir les chemins `.srt` et `.ass`;
-2. si le `.srt` existe deja, le reutiliser et generer le `.ass` manquant;
-3. extraire l'audio de la video;
-4. convertir l'audio en WAV mono 16 kHz;
-5. detecter les segments de parole;
-6. transcrire chaque segment;
-7. nettoyer/fusionner les sous-titres;
-8. ecrire `.srt`;
-9. ecrire `.ass`.
-
-Avant de charger Whisper ou pyannote, `process_directory(...)` verifie les
-sorties deja presentes. Une video deja terminee ne charge donc aucun modele.
-Les erreurs sont isolees par video afin que le reste du dossier continue.
-Un callback optionnel est appele immediatement apres chaque video. Le notebook
-l'utilise pour afficher les sorties disponibles sans attendre la fin du lot et
-accepte une limite de videos pour les essais rapides.
-Les etapes audio, diarisation, transcription, preparation et ecriture sont
-journalisees. La transcription et la traduction ASS affichent le numero du
-segment et leur pourcentage d'avancement.
-
-## 4. Modeles De Donnees
-
-Fichier: `src/dual_subtitles/models/subtitle.py`
-
-Contient les objets simples du domaine:
-
-- `Segment`: portion audio avec debut, fin et locuteur;
-- `SubtitleSegment`: portion sous-titree avec debut, fin, texte et locuteur;
-- `InterlinearTranslator`: protocole attendu par la generation ASS.
-
-## 5. Entrees Et Sorties
-
-Fichiers:
-
-- `src/dual_subtitles/io/audio.py`
-- `src/dual_subtitles/io/subtitle_files.py`
-
-`audio.py` gere:
-
-- extraction audio depuis `.mp4` avec `moviepy`;
-- normalisation mono 16 kHz avec `pydub`;
-- chargement audio pour decouper les chunks.
-
-`subtitle_files.py` gere:
-
-- construction et ecriture SRT;
-- lecture d'un SRT existant;
-- construction et ecriture ASS;
-- mesure approximative de chaque paire source/traduction;
-- placement RTL et retour automatique sur plusieurs rangees.
-
-## 6. Services Externes
-
-Fichiers:
-
-- `src/dual_subtitles/services/diarization.py`
-- `src/dual_subtitles/services/transcription.py`
-- `src/dual_subtitles/services/translation.py`
-
-`diarization.py` charge pyannote et exige `HUGGINGFACE_TOKEN` si la diarisation
-est activee.
-
-`transcription.py` charge Whisper via `transformers.pipeline` et retourne des
-`SubtitleSegment` timestamps.
-
-Lorsqu'un GPU CUDA est disponible, Whisper charge ses poids en `float16` et le
-pipeline pyannote est explicitement deplace sur le meme GPU. La configuration
-`device=0` du notebook selectionne le premier GPU Colab.
-
-`translation.py` utilise `deep-translator` pour traduire litteralement chaque
-mot source vers la langue cible. La seconde ligne place les traductions dans
-l'ordre visuel inverse afin de suivre de gauche a droite les mots source
-affiches de droite a gauche. Les traductions sont mises en cache par mot.
-
-Le rendu ASS utilise deux evenements par paire. Le mot source et sa traduction
-partagent exactement la meme coordonnee horizontale. Le style source utilise
-une taille de 48 sur une base `1280x720`, contre 30 pour la traduction cible.
-Si une rangee depasse la zone sure, les paires suivantes passent ensemble sur
-une nouvelle rangee sans separer un mot de sa traduction.
-
-## 7. Segmentation Et Nettoyage
-
-Fichier: `src/dual_subtitles/core/segmentation.py`
-
-Regroupe les anciennes constantes et boucles du notebook:
+Les segments de parole passent par
+`src/dual_subtitles/core/segmentation.py`:
 
 - suppression des segments trop courts;
-- fusion de segments proches du meme locuteur;
+- fusion des segments proches appartenant au meme locuteur;
 - decoupage des segments trop longs;
-- suppression des textes vides;
-- correction des chevauchements;
-- fusion de petits chunks Whisper;
-- ajout de retours ligne dans les sous-titres longs.
-- suppression des mots dupliques aux frontieres des chunks avec padding.
+- ajout d'un padding audio autour de chaque chunk.
 
-Lors de l'ecriture ASS, les retours ligne physiques sont convertis en `\\N` et
-les accolades sont neutralisees pour ne pas creer de balises ASS involontaires.
+`WhisperTranscriber`, dans
+`src/dual_subtitles/services/transcription.py`, transcrit ensuite chaque
+segment avec ses timestamps et son locuteur.
 
-## 8. Timestamps
+Sur CUDA, Whisper utilise `float16`. Sur CPU, il utilise `float32`. Les
+timestamps produits sont decales selon le debut reel du chunk, borne a zero.
 
-Fichier: `src/dual_subtitles/utils/timestamps.py`
+Apres transcription:
 
-Contient les fonctions de formatage et parsing:
+- les textes vides et timestamps invalides sont supprimes;
+- les chevauchements temporels sont corriges;
+- les mots repetes aux frontieres du padding sont dedupliques;
+- les petits fragments sont regroupes sans depasser les limites configurees;
+- les sous-titres longs recoivent un retour a la ligne pour le SRT.
 
-- `format_srt_timestamp(...)`;
-- `format_ass_timestamp(...)`;
-- `parse_srt_timestamp(...)`.
+La progression est journalisee segment par segment avec un pourcentage.
 
-## 9. CLI
+## 6. Traduction Mot A Mot
 
-Fichiers:
+`src/dual_subtitles/services/translation.py` utilise `deep-translator`.
 
-- `src/dual_subtitles/cli.py`
-- `src/dual_subtitles/main.py`
+Chaque mot source est traduit independamment et produit un `WordPair`:
 
-Commande principale:
+```text
+WordPair(source="...", translation="...")
+```
+
+Les traductions sont mises en cache par mot afin d'eviter les appels repetes.
+En cas d'echec du service, le mot source est conserve comme solution de
+secours.
+
+`InterlinearGoogleTranslator.interlinear(...)` reste disponible pour produire
+une representation textuelle sur deux lignes. Le rendu ASS utilise directement
+les paires structurees.
+
+## 7. Rendu ASS Interlineaire
+
+`src/dual_subtitles/io/subtitle_files.py` genere un script ASS sur une base
+virtuelle `1280x720`.
+
+Pour chaque `WordPair`, deux evenements partagent exactement la meme
+coordonnee horizontale:
+
+- `ArabicWord`: mot source, taille 48;
+- `EnglishGloss`: traduction cible, taille 30.
+
+Ces noms de styles sont internes au format actuel. Les langues restent
+configurables dans `ProcessingConfig`.
+
+Le moteur de placement:
+
+1. estime la largeur du mot source et de sa traduction;
+2. reserve une colonne selon le texte le plus large;
+3. place les paires de droite a gauche dans la zone sure;
+4. conserve la traduction centree sous son mot;
+5. cree une nouvelle rangee lorsque la largeur disponible est depassee.
+
+Une paire n'est jamais separee entre deux rangees. Les accolades et retours de
+ligne sont neutralises avant l'ecriture afin de ne pas injecter de balises ASS
+involontaires.
+
+La progression de la traduction ASS est journalisee sous-titre par sous-titre.
+
+## 8. Sorties SRT Et ASS
+
+Le module `src/dual_subtitles/io/subtitle_files.py` fournit:
+
+- `build_srt(...)` et `write_srt(...)`;
+- `parse_srt(...)` pour reutiliser un SRT existant;
+- `build_ass(...)` et `write_ass(...)`.
+
+Le SRT contient la transcription lisible et ses timestamps. L'ASS contient les
+evenements positionnes pour l'affichage interlineaire.
+
+Chaque fichier est annonce dans les logs des qu'il est disponible. Le callback
+de fin de video permet au notebook d'afficher `TERMINE` sans attendre la fin
+du lot complet.
+
+## 9. Execution Dans Google Colab
+
+`subtitles_gen.ipynb` sert de runner:
+
+1. monte Google Drive;
+2. clone ou actualise le depot;
+3. verifie et installe l'environnement;
+4. demande le token Hugging Face;
+5. active et affiche le GPU CUDA;
+6. decouvre les videos;
+7. lance le traitement avec progression en direct.
+
+Les videos et sorties sont conservees dans Google Drive. Les fichiers
+temporaires restent dans `/content`.
+
+La cellule de traitement utilise `VIDEO_LIMIT = None` pour traiter tout le
+dossier. La valeur `1` permet un essai rapide sur la premiere video.
+
+## 10. Architecture Du Package
+
+```text
+src/dual_subtitles/
+|-- cli.py
+|-- main.py
+|-- core/
+|   |-- config.py
+|   |-- pipeline.py
+|   `-- segmentation.py
+|-- io/
+|   |-- audio.py
+|   `-- subtitle_files.py
+|-- models/
+|   `-- subtitle.py
+|-- services/
+|   |-- diarization.py
+|   |-- transcription.py
+|   `-- translation.py
+`-- utils/
+    `-- timestamps.py
+```
+
+- `core`: configuration, orchestration et regles de segmentation;
+- `io`: lecture et ecriture des fichiers;
+- `models`: objets de donnees et protocoles;
+- `services`: integrations Whisper, pyannote et traduction;
+- `utils`: fonctions generiques, notamment les timestamps;
+- `cli.py`: interface de ligne de commande;
+- `main.py`: point d'entree executable.
+
+## 11. CLI Et Verification
+
+Commande locale:
 
 ```bash
 dual-subtitles process --input-dir ./videos --output-dir ./subtitles
 ```
 
-`main.py` permet aussi de lancer le package comme module Python si besoin.
+Execution explicite du module:
+
+```bash
+python -m dual_subtitles.main process \
+  --input-dir ./videos \
+  --output-dir ./subtitles
+```
+
+Controles du depot:
+
+```bash
+ruff check src tests
+ruff format --check src tests
+mypy src
+pytest
+```
