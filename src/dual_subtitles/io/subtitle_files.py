@@ -26,8 +26,8 @@ ASS_BOTTOM_MARGIN = 35
 ASS_COLUMN_GAP = 18
 ASS_COLUMN_PADDING = 14
 ASS_ROW_HEIGHT = 90
-ASS_PAIR_VERTICAL_GAP = 44
-ASS_ARABIC_FONT_SIZE = 42
+ASS_PAIR_VERTICAL_GAP = 50
+ASS_ARABIC_FONT_SIZE = 48
 ASS_ENGLISH_FONT_SIZE = 30
 LOGGER = logging.getLogger(__name__)
 
@@ -186,7 +186,7 @@ def build_ass(
         "OutlineColour,BackColour,Bold,Italic,Underline,Strikeout,ScaleX,"
         "ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,"
         "MarginR,MarginV,Encoding\n"
-        "Style: ArabicWord,Arial,42,&H00FFFFFF,&H000000FF,"
+        "Style: ArabicWord,Arial,48,&H00FFFFFF,&H000000FF,"
         "&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,5,0,0,0,1\n"
         "Style: EnglishGloss,Arial,30,&H00D9FFFF,&H000000FF,"
         "&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,5,0,0,0,1\n\n"
