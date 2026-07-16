@@ -1,9 +1,19 @@
 # Dual Subtitles
 
+## Example
+
+<p align="center">
+  <img src="docs/images/example-1.png" width="49%" alt="Example 1">
+  <img src="docs/images/example-2.png" width="49%" alt="Example 2">
+  <br>
+  <img src="docs/images/example-3.png" width="49%" alt="Example 3">
+  <img src="docs/images/example-4.png" width="49%" alt="Example 4">
+</p>
+
 Dual Subtitles genere des sous-titres a partir de videos `.mp4`:
 
 - `.srt` avec transcription Whisper;
-- `.ass` avec chaque mot source au-dessus de sa traduction litterale anglaise;
+- `.ass` avec chaque mot source au-dessus de sa traduction litterale cible;
 - diarisation optionnelle des locuteurs avec pyannote.
 
 Le pipeline est documente etape par etape dans

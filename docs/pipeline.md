@@ -199,15 +199,15 @@ pipeline pyannote est explicitement deplace sur le meme GPU. La configuration
 `device=0` du notebook selectionne le premier GPU Colab.
 
 `translation.py` utilise `deep-translator` pour traduire litteralement chaque
-mot arabe vers l'anglais. La seconde ligne place les traductions dans l'ordre
-visuel inverse afin de suivre de gauche a droite les mots arabes affiches de
-droite a gauche. Les traductions sont mises en cache par mot.
+mot source vers la langue cible. La seconde ligne place les traductions dans
+l'ordre visuel inverse afin de suivre de gauche a droite les mots source
+affiches de droite a gauche. Les traductions sont mises en cache par mot.
 
-Le rendu ASS utilise deux evenements par paire. Le mot arabe et sa traduction
-partagent exactement la meme coordonnee horizontale. Le style arabe utilise une
-taille de 48 sur une base `1280x720`, contre 30 pour la traduction anglaise. Si
-une rangee depasse la zone sure, les paires suivantes passent ensemble sur une
-nouvelle rangee sans separer un mot de sa traduction.
+Le rendu ASS utilise deux evenements par paire. Le mot source et sa traduction
+partagent exactement la meme coordonnee horizontale. Le style source utilise
+une taille de 48 sur une base `1280x720`, contre 30 pour la traduction cible.
+Si une rangee depasse la zone sure, les paires suivantes passent ensemble sur
+une nouvelle rangee sans separer un mot de sa traduction.
 
 ## 7. Segmentation Et Nettoyage
 
