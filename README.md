@@ -9,11 +9,11 @@
 
 Dual Subtitles transforme des videos `.mp4` en sous-titres bilingues lisibles:
 
-- transcription `.srt` avec Whisper;
-- rendu `.ass` pedagogique avec glosses quasi mot a mot contextualisees;
-- diacritisation prudente, morphologie, detection et translitteration des noms;
-- diarisation optionnelle des locuteurs avec pyannote;
-- traitement linguistique local, sans LLM ni API de traduction;
+- transcription `.srt` avec Whisper.
+- rendu `.ass` pedagogique avec glosses quasi mot a mot contextualisees.
+- diacritisation prudente, morphologie, detection et translitteration des noms.
+- diarisation optionnelle des locuteurs avec pyannote.
+- traitement linguistique local avec modèles Transformers.
 - acceleration CUDA avec repli CPU pour tous les modeles.
 
 La transcription complete d'une video est terminee avant l'analyse linguistique.
