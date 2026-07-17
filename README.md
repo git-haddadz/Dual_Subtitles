@@ -10,9 +10,15 @@
 Dual Subtitles transforme des videos `.mp4` en sous-titres bilingues lisibles:
 
 - transcription `.srt` avec Whisper;
-- rendu `.ass` mot a mot, avec traduction litterale alignee;
+- rendu `.ass` pedagogique avec glosses quasi mot a mot contextualisees;
+- diacritisation prudente, morphologie, detection et translitteration des noms;
 - diarisation optionnelle des locuteurs avec pyannote;
-- acceleration CUDA pour Whisper et pyannote.
+- traitement linguistique local, sans LLM ni API de traduction;
+- acceleration CUDA avec repli CPU pour tous les modeles.
+
+La transcription complete d'une video est terminee avant l'analyse linguistique.
+La traduction naturelle sert uniquement d'ancrage interne: le spectateur voit la
+source et sa glose pedagogique, pas une seconde phrase concurrente.
 
 ## Google Colab
 
@@ -29,6 +35,9 @@ autorise a utiliser `pyannote/speaker-diarization-3.1`.
 ```bash
 pip install -r requirements.txt
 pip install -e .
+camel_data -i morphology-db-all
+camel_data -i disambig-mle-all
+camel_data -i ner-arabert
 export HUGGINGFACE_TOKEN=your_token_here
 dual-subtitles process --input-dir ./videos --output-dir ./subtitles --verbose
 ```
@@ -45,6 +54,18 @@ Options utiles:
 dual-subtitles process --input-dir ./videos --output-dir ./subtitles --no-ass
 dual-subtitles process --input-dir ./videos --output-dir ./subtitles --no-diarization
 ```
+
+Les modeles de traduction, d'alignement et de diacritisation sont telecharges
+une fois puis reutilises depuis le cache local. La configuration par defaut est
+specialisee pour une source arabe et une cible anglaise. Une autre langue cible
+reste possible en fournissant un modele de traduction local compatible avec
+`--translation-model`.
+
+Le rendu 720p utilise Noto Naskh Arabic en 64 px pour donner la priorite a la
+source et Noto Sans en 28 px pour les glosses. Les polices sont fournies avec le
+package, copiees dans le dossier de sortie `fonts/` et servent aussi aux mesures
+de placement. Installez-les sur la machine de lecture si le lecteur video ne
+charge pas automatiquement les polices voisines.
 
 ## Documentation
 

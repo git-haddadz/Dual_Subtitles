@@ -27,6 +27,11 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--transcription-language", default="ar")
     process.add_argument("--translation-source-language", default="ar")
     process.add_argument("--translation-target-language", default="en")
+    process.add_argument(
+        "--translation-model",
+        default="Helsinki-NLP/opus-mt-ar-en",
+    )
+    process.add_argument("--alignment-model", default="bert-base-multilingual-cased")
     process.add_argument("--whisper-model", default="openai/whisper-large-v3")
     process.add_argument(
         "--diarization-model",
@@ -40,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--transcription-padding", default=0.3, type=float)
     process.add_argument("--max-words-per-subtitle", default=8, type=int)
     process.add_argument("--line-break-words", default=6, type=int)
+    process.add_argument("--context-before", default=2, type=int)
+    process.add_argument("--context-after", default=2, type=int)
+    process.add_argument("--context-max-tokens", default=256, type=int)
+    process.add_argument("--context-max-gap", default=8.0, type=float)
+    process.add_argument("--diacritization-min-confidence", default=0.78, type=float)
     process.add_argument("--device")
     process.add_argument("--no-srt", action="store_true")
     process.add_argument("--no-ass", action="store_true")
@@ -77,6 +87,8 @@ def _process(args: argparse.Namespace, temp_dir: Path) -> int:
         transcription_language=args.transcription_language,
         translation_source_language=args.translation_source_language,
         translation_target_language=args.translation_target_language,
+        translation_model=args.translation_model,
+        alignment_model=args.alignment_model,
         whisper_model=args.whisper_model,
         diarization_model=args.diarization_model,
         min_speech_duration=args.min_speech_duration,
@@ -87,6 +99,11 @@ def _process(args: argparse.Namespace, temp_dir: Path) -> int:
         transcription_padding=args.transcription_padding,
         max_words_per_subtitle=args.max_words_per_subtitle,
         line_break_words=args.line_break_words,
+        context_before=args.context_before,
+        context_after=args.context_after,
+        context_max_tokens=args.context_max_tokens,
+        context_max_gap=args.context_max_gap,
+        diacritization_min_confidence=args.diacritization_min_confidence,
         generate_srt=not args.no_srt,
         generate_ass=not args.no_ass,
         skip_existing=not args.no_skip_existing,

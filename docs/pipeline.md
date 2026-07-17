@@ -1,258 +1,191 @@
 # Pipeline Dual Subtitles
 
-Ce document decrit le parcours complet d'une video, depuis sa decouverte
-jusqu'a la generation des fichiers SRT et ASS.
+Ce document decrit le traitement d'une video, de sa decouverte au rendu ASS
+pedagogique. Le notebook Colab et la CLI appellent le meme package Python.
 
 ## Vue D'ensemble
 
 ```text
-Video MP4
-  -> extraction et normalisation audio
-  -> diarisation des locuteurs
-  -> segmentation des zones de parole
-  -> transcription Whisper
-  -> nettoyage et regroupement
-  -> traduction litterale mot a mot
-  -> ecriture SRT et rendu ASS interlineaire
+Video
+  -> audio, diarisation et transcription complete
+  -> SRT disponible immediatement
+  -> tokenisation non destructive et contextes
+  -> traduction naturelle interne
+  -> morphologie et diacritisation
+  -> NER, translitteration et memoire d'entites
+  -> alignement et glosses contextualisees
+  -> validation
+  -> rendu ASS
 ```
 
-Le notebook Colab et la CLI appellent le meme package Python. La logique metier
-n'est pas dupliquee dans le notebook.
+Les etapes generiques emploient les termes source et cible. La morphologie, la
+diacritisation, le NER et la translitteration fournis actuellement sont
+specialises pour une source arabe.
 
-## 1. Configuration
+## 1. Configuration Et Reprise
 
-La classe `ProcessingConfig`, dans
-`src/dual_subtitles/core/config.py`, centralise:
+`ProcessingConfig` centralise les chemins, langues, modeles, seuils, fenetres
+contextuelles et parametres de rendu. Les valeurs par defaut importantes sont:
 
-- les dossiers d'entree, de sortie et de travail temporaire;
-- les langues de transcription, source et cible;
-- les modeles Whisper et pyannote;
-- les seuils de segmentation, de fusion et de padding;
-- la taille maximale des segments et sous-titres;
-- l'activation des sorties SRT, ASS et de la diarisation;
-- le peripherique d'execution CPU ou GPU.
+- traduction locale `Helsinki-NLP/opus-mt-ar-en`;
+- alignement `bert-base-multilingual-cased`;
+- morphologie et NER CAMeL Tools;
+- diacritisation CATT;
+- deux sous-titres de contexte avant et apres, sans franchir une pause de huit
+  secondes et dans une limite de 256 sous-tokens;
+- seuil de diacritisation visible de `0.78`;
+- source 64 px et glose 28 px sur une base `1280x720`.
 
-La configuration refuse les valeurs negatives, les limites nulles et une
-execution dans laquelle les sorties SRT et ASS seraient toutes les deux
-desactivees.
+Une cible autre que l'anglais exige un `translation_model` explicite. Les
+valeurs invalides sont refusees avant le chargement des modeles.
 
-## 2. Decouverte, Reprise Et Traitement Par Lot
+`process_directory(...)` trie les videos, charge les services lourds au premier
+besoin et isole les erreurs par video. `skip_existing` conserve les sorties non
+vides. Si seul le SRT existe, toute sa transcription est relue avant de
+regenerer l'ASS, sans relancer Whisper ou pyannote.
 
-`process_directory(...)`, dans `src/dual_subtitles/core/pipeline.py`:
+Le callback `on_video_complete` annonce chaque fichier termine. Le callback
+`on_progress(video, stage, current, total)` expose en direct les etapes
+`translation`, `morphology`, `diacritization`, `ner`, `alignment`, `glosses` et
+`validation` et `ass`.
 
-1. verifie le dossier d'entree;
-2. decouvre les fichiers correspondant a l'extension configuree;
-3. trie les videos par nom;
-4. determine les sorties encore necessaires;
-5. charge les services lourds uniquement au premier besoin;
-6. traite les videos l'une apres l'autre.
+## 2. Audio, Diarisation Et Transcription
 
-Une limite optionnelle permet de ne traiter que les premieres videos pendant un
-essai. Un callback peut egalement etre appele apres chaque video avec:
+MoviePy et ffmpeg extraient l'audio, puis pydub le normalise en mono 16 kHz.
+Pyannote detecte les locuteurs lorsque la diarisation est activee; sinon un
+locuteur unique couvre la video.
 
-- le chemin de la video;
-- les sorties disponibles;
-- l'erreur eventuelle.
+Les zones de parole sont filtrees, fusionnees et decoupees avant Whisper. Les
+chunks conservent leurs timestamps et leur locuteur. Les recouvrements du
+padding sont dedupliques, puis les fragments sont regroupes selon les limites
+de duree et de mots.
 
-### Reutilisation Des Sorties
+La liste complete des `SubtitleSegment` d'une video est construite avant le
+premier traitement linguistique. Le SRT est alors ecrit. Une erreur ulterieure
+laisse donc une transcription testable et n'interrompt pas les autres videos.
 
-Lorsque `skip_existing` est active:
+## 3. Contrat D'annotation
 
-- une sortie demandee deja presente et non vide est conservee;
-- si le SRT existe mais que l'ASS manque, le SRT est relu pour regenerer
-  uniquement l'ASS;
-- Whisper et pyannote ne sont pas charges si aucune retranscription n'est
-  necessaire.
+Le remplacement structure de l'ancien `WordPair` repose sur:
 
-Chaque erreur est journalisee sans interrompre les videos suivantes.
+- `AnnotatedToken`: surface exacte, offsets, type, morphologie, forme vocalisee,
+  entite, translitteration, glose, alignements et confiances;
+- `AnnotatedSpan`: intervalle lexical affiche comme une seule paire;
+- `AnnotatedSubtitle`: segment, tokens, contextes et traduction interne;
+- `AnnotatedVideo`: transcription annotee et memoire d'entites.
 
-## 3. Extraction Et Normalisation Audio
+`WordPair` et `InterlinearTranslator` restent uniquement comme adaptateurs de
+compatibilite; le pipeline principal ne les utilise plus.
 
-`src/dual_subtitles/io/audio.py` assure:
+## 4. Tokenisation Et Contextes
 
-- l'extraction de la piste audio avec MoviePy et ffmpeg;
-- la conversion en WAV;
-- la normalisation en mono 16 kHz avec pydub;
-- le chargement de l'audio pour le decoupage des chunks.
+La tokenisation distingue mots et ponctuation en conservant les offsets exacts.
+Les espaces, retours de ligne et signes restent dans le texte original entre
+ces offsets. La reconstruction doit etre strictement identique a la sortie
+Whisper; aucune normalisation ne remplace la surface affichee.
 
-Les fichiers WAV et chunks temporaires sont supprimes apres chaque video, y
-compris lorsqu'une etape echoue.
+Chaque sous-titre reference une fenetre bornee de voisins. Ces tokens de
+contexte alimentent la desambiguisation morphologique, le NER et les embeddings
+d'alignement, tout en ne produisant une sortie que pour le sous-titre courant.
 
-## 4. Diarisation
+## 5. Traduction Naturelle Interne
 
-`src/dual_subtitles/services/diarization.py` encapsule pyannote.
+Marian traduit localement chaque sous-titre en lots et met les resultats en
+cache. Cette phrase naturelle sert d'ancrage semantique et n'est jamais rendue
+dans l'ASS. Le meme moteur produit des candidats de repli pour les mots non
+alignes. Aucun texte n'est envoye vers une API distante.
 
-Lorsque la diarisation est activee:
+## 6. Morphologie Et Diacritisation
 
-1. `PyannoteDiarizer` lit `HUGGINGFACE_TOKEN`;
-2. le pipeline `pyannote/speaker-diarization-3.1` est charge;
-3. les tours de parole sont convertis en objets `Segment`;
-4. le pipeline pyannote est deplace sur CUDA lorsqu'un GPU est selectionne.
+CAMeL Tools fournit le lemme, la racine, la categorie grammaticale, les
+clitiques et les traits disponibles. En mode `auto`, les analyses MSA et
+Egyptian sont comparees au niveau de la phrase et la mieux notee est retenue;
+MSA reste le repli si les donnees dialectales manquent. Ces annotations sont
+paralleles a la surface originale.
 
-Sans diarisation, `SingleSpeakerDiarizer` cree un segment couvrant toute la
-duree de l'audio.
+CATT propose une phrase vocalisee. Pour chaque mot:
 
-Le token Hugging Face est lu depuis l'environnement. Il n'est ni ecrit dans les
-sous-titres ni conserve par le package.
+1. retirer les diacritiques doit redonner exactement les memes lettres;
+2. l'accord avec la forme CAMeL augmente la confiance;
+3. les marques internes, shadda et sukun sont conservees;
+4. une desinence grammaticale identifiee comme incertaine est retiree;
+5. sous le seuil, le mot Whisper entier reste affiche sans diacritiques ajoutes.
 
-## 5. Segmentation Et Transcription
+Une indisponibilite de modele ajoute un avertissement interne et utilise ce
+repli conservateur au lieu de bloquer le fichier.
 
-Les segments de parole passent par
-`src/dual_subtitles/core/segmentation.py`:
+## 7. Noms Et Memoire D'entites
 
-- suppression des segments trop courts;
-- fusion des segments proches appartenant au meme locuteur;
-- decoupage des segments trop longs;
-- ajout d'un padding audio autour de chaque chunk.
+Le NER CAMeL produit des etiquettes BIO fusionnees en spans `PERSON`,
+`LOCATION`, `ORGANIZATION` ou `MISC`. Les variantes sont rapprochees au niveau
+de la video avec une cle consonantique, le type et une similarite prudente.
 
-`WhisperTranscriber`, dans
-`src/dual_subtitles/services/transcription.py`, transcrit ensuite chaque
-segment avec ses timestamps et son locuteur.
+Une forme latine fiable trouvee dans la traduction naturelle devient la forme
+canonique. Sinon, le systeme translittere la forme vocalisee avec une notation
+lisible (`sh`, `kh`, `gh`, `q`, `ʿ`, `ā`, etc.). Cette forme est reutilisee dans
+toute la video. Il ne s'agit ni d'un glossaire fixe ni d'une memoire utilisateur.
 
-Sur CUDA, Whisper utilise `float16`. Sur CPU, il utilise `float32`. Les
-timestamps produits sont decales selon le debut reel du chunk, borne a zero.
+## 8. Glosses Et Validation
 
-Apres transcription:
+Un aligner mutual-nearest/IterMax compare les embeddings mBERT des mots source
+et cible dans leurs fenetres. Il accepte les alignements contigus
+un-vers-plusieurs. Un mot non aligne recoit un candidat local issu de sa surface
+ou de son lemme. Une entite recoit sa translitteration canonique.
 
-- les textes vides et timestamps invalides sont supprimes;
-- les chevauchements temporels sont corriges;
-- les mots repetes aux frontieres du padding sont dedupliques;
-- les petits fragments sont regroupes sans depasser les limites configurees;
-- les sous-titres longs recoivent un retour a la ligne pour le SRT.
+Chaque mot lexical produit un span `TOKEN`. Seules une entite NER ou une
+expression indivisible explicitement reconnue peut devenir un span multi-token.
+La sortie reste donc quasi mot a mot et adaptee a l'apprentissage du vocabulaire.
 
-La progression est journalisee segment par segment avec un pourcentage.
+Avant le rendu, la validation controle la reconstruction, les chevauchements,
+la couverture lexicale, les glosses vides et la coherence des entites. Les
+confiances de morphologie, diacritisation, NER, alignement et glose restent dans
+les objets et les logs; aucun symbole parasite n'est affiche.
 
-## 6. Traduction Mot A Mot
+## 9. Rendu ASS Pedagogique
 
-`src/dual_subtitles/services/translation.py` utilise `deep-translator`.
+Pillow mesure le texte avec les polices Noto fournies. Un repli deterministe est
+disponible si le moteur de police est absent. Les TTF sont aussi copies dans le
+dossier de sortie `fonts/` pour pouvoir etre installes sur la machine de
+lecture. Pour chaque span, deux evenements ASS partagent le meme centre
+horizontal:
 
-Chaque mot source est traduit independamment et produit un `WordPair`:
+- `SourceWord`: Noto Naskh Arabic, 64 px;
+- `TargetGloss`: Noto Sans, 28 px.
 
-```text
-WordPair(source="...", translation="...")
-```
+Les paires sont placees de droite a gauche. Leur largeur est le maximum des deux
+lignes avec padding. Une nouvelle rangee est creee avant tout debordement. Une
+glose longue peut utiliser deux lignes, mais une entite n'est jamais decoupee et
+la source n'est jamais reduite. La hauteur de chaque rangee tient compte des
+metriques reelles et de l'espace necessaire aux diacritiques.
 
-Les traductions sont mises en cache par mot afin d'eviter les appels repetes.
-En cas d'echec du service, le mot source est conserve comme solution de
-secours.
+## 10. Installation Colab Et Locale
 
-`InterlinearGoogleTranslator.interlinear(...)` reste disponible pour produire
-une representation textuelle sur deux lignes. Le rendu ASS utilise directement
-les paires structurees.
-
-## 7. Rendu ASS Interlineaire
-
-`src/dual_subtitles/io/subtitle_files.py` genere un script ASS sur une base
-virtuelle `1280x720`.
-
-Pour chaque `WordPair`, deux evenements partagent exactement la meme
-coordonnee horizontale:
-
-- `ArabicWord`: mot source, taille 48;
-- `EnglishGloss`: traduction cible, taille 30.
-
-Ces noms de styles sont internes au format actuel. Les langues restent
-configurables dans `ProcessingConfig`.
-
-Le moteur de placement:
-
-1. estime la largeur du mot source et de sa traduction;
-2. reserve une colonne selon le texte le plus large;
-3. place les paires de droite a gauche dans la zone sure;
-4. conserve la traduction centree sous son mot;
-5. cree une nouvelle rangee lorsque la largeur disponible est depassee.
-
-Une paire n'est jamais separee entre deux rangees. Les accolades et retours de
-ligne sont neutralises avant l'ecriture afin de ne pas injecter de balises ASS
-involontaires.
-
-La progression de la traduction ASS est journalisee sous-titre par sous-titre.
-
-## 8. Sorties SRT Et ASS
-
-Le module `src/dual_subtitles/io/subtitle_files.py` fournit:
-
-- `build_srt(...)` et `write_srt(...)`;
-- `parse_srt(...)` pour reutiliser un SRT existant;
-- `build_ass(...)` et `write_ass(...)`.
-
-Le SRT contient la transcription lisible et ses timestamps. L'ASS contient les
-evenements positionnes pour l'affichage interlineaire.
-
-Chaque fichier est annonce dans les logs des qu'il est disponible. Le callback
-de fin de video permet au notebook d'afficher `TERMINE` sans attendre la fin
-du lot complet.
-
-## 9. Execution Dans Google Colab
-
-`subtitles_gen.ipynb` sert de runner:
-
-1. monte Google Drive;
-2. clone ou actualise le depot;
-3. verifie et installe l'environnement;
-4. demande le token Hugging Face;
-5. active et affiche le GPU CUDA;
-6. decouvre les videos;
-7. lance le traitement avec progression en direct.
-
-Les videos et sorties sont conservees dans Google Drive. Les fichiers
-temporaires restent dans `/content`.
-
-La cellule de traitement utilise `VIDEO_LIMIT = None` pour traiter tout le
-dossier. La valeur `1` permet un essai rapide sur la premiere video.
-
-## 10. Architecture Du Package
-
-```text
-src/dual_subtitles/
-|-- cli.py
-|-- main.py
-|-- core/
-|   |-- config.py
-|   |-- pipeline.py
-|   `-- segmentation.py
-|-- io/
-|   |-- audio.py
-|   `-- subtitle_files.py
-|-- models/
-|   `-- subtitle.py
-|-- services/
-|   |-- diarization.py
-|   |-- transcription.py
-|   `-- translation.py
-`-- utils/
-    `-- timestamps.py
-```
-
-- `core`: configuration, orchestration et regles de segmentation;
-- `io`: lecture et ecriture des fichiers;
-- `models`: objets de donnees et protocoles;
-- `services`: integrations Whisper, pyannote et traduction;
-- `utils`: fonctions generiques, notamment les timestamps;
-- `cli.py`: interface de ligne de commande;
-- `main.py`: point d'entree executable.
-
-## 11. CLI Et Verification
-
-Commande locale:
+Outre les dependances Python, CAMeL requiert ses donnees locales:
 
 ```bash
-dual-subtitles process --input-dir ./videos --output-dir ./subtitles
+pip install -r requirements.txt
+pip install -e .
+camel_data -i morphology-db-all
+camel_data -i disambig-mle-all
+camel_data -i ner-arabert
 ```
 
-Execution explicite du module:
+Le notebook verifie les versions, installe ces donnees une fois, redemarre
+uniquement apres un changement d'environnement puis affiche chaque etape en
+direct. Les modeles Hugging Face et CATT sont telecharges au premier usage et
+restent dans leurs caches locaux.
 
-```bash
-python -m dual_subtitles.main process \
-  --input-dir ./videos \
-  --output-dir ./subtitles
-```
+## 11. Verification
 
-Controles du depot:
+Les tests unitaires injectent des doubles et ne telechargent aucun modele. Les
+tests qui chargent de vrais modeles doivent porter le marqueur `integration`.
 
 ```bash
 ruff check src tests
 ruff format --check src tests
-mypy src
 pytest
 ```
+
+Les controles couvrent notamment la tokenisation non destructive, les limites
+de contexte, la diacritisation prudente, les entites repetees, les alignements
+un-vers-plusieurs et le centrage des evenements ASS.
