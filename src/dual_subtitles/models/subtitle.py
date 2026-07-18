@@ -62,7 +62,6 @@ class ConfidenceBreakdown:
     morphology: float = 0.0
     diacritization: float = 0.0
     ner: float = 0.0
-    alignment: float = 0.0
     gloss: float = 0.0
     overall: float = 0.0
 
@@ -87,7 +86,6 @@ class AnnotatedToken:
     entity_type: EntityType | None = None
     transliteration: str | None = None
     gloss: str | None = None
-    target_indices: tuple[int, ...] = ()
     confidence: ConfidenceBreakdown = field(default_factory=ConfidenceBreakdown)
     warnings: list[str] = field(default_factory=list)
 
@@ -111,7 +109,6 @@ class AnnotatedSpan:
     gloss: str
     transliteration: str | None = None
     entity_id: str | None = None
-    target_indices: tuple[int, ...] = ()
     confidence: ConfidenceBreakdown = field(default_factory=ConfidenceBreakdown)
     warnings: list[str] = field(default_factory=list)
 
@@ -124,9 +121,6 @@ class AnnotatedSubtitle:
     subtitle_index: int
     tokens: list[AnnotatedToken]
     context_indices: tuple[int, ...] = ()
-    natural_translation: str = ""
-    target_tokens: list[str] = field(default_factory=list)
-    alignments: dict[int, tuple[int, ...]] = field(default_factory=dict)
     spans: list[AnnotatedSpan] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 

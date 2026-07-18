@@ -28,10 +28,7 @@ from dual_subtitles.models.subtitle import Segment, SubtitleSegment
 from dual_subtitles.services.diarization import PyannoteDiarizer, SingleSpeakerDiarizer
 from dual_subtitles.services.linguistics import PedagogicalAnnotator
 from dual_subtitles.services.transcription import WhisperTranscriber
-from dual_subtitles.services.translation import (
-    InterlinearGoogleTranslator,  # noqa: F401 - legacy monkeypatch surface.
-    LocalMarianTranslator,
-)
+from dual_subtitles.services.translation import InterlinearGoogleTranslator
 
 LOGGER = logging.getLogger(__name__)
 MIN_TRANSCRIBABLE_DURATION = 0.3
@@ -49,7 +46,7 @@ def discover_videos(input_dir: Path, extension: str) -> list[Path]:
     )
 
 
-def process_directory(  # noqa: PLR0912 - lazy service orchestration.
+def process_directory(  # noqa: PLR0912, PLR0915 - lazy service orchestration.
     config: ProcessingConfig,
     *,
     video_limit: int | None = None,
@@ -81,7 +78,7 @@ def process_directory(  # noqa: PLR0912 - lazy service orchestration.
 
     transcriber: WhisperTranscriber | None = None
     diarizer: PyannoteDiarizer | None = None
-    translator: LocalMarianTranslator | None = None
+    lexical_translator: InterlinearGoogleTranslator | None = None
     annotator: PedagogicalAnnotator | None = None
 
     generated_files: list[Path] = []
@@ -103,10 +100,10 @@ def process_directory(  # noqa: PLR0912 - lazy service orchestration.
                     )
 
             if _needs_translation(video_path, config):
-                if translator is None:
-                    translator = LocalMarianTranslator(
-                        model_name=config.translation_model,
-                        device=config.device,
+                if lexical_translator is None:
+                    lexical_translator = InterlinearGoogleTranslator(
+                        source_language=config.translation_source_language,
+                        target_language=config.translation_target_language,
                     )
                 progress = None
                 if on_progress is not None:
@@ -122,7 +119,7 @@ def process_directory(  # noqa: PLR0912 - lazy service orchestration.
                 if annotator is None:
                     annotator = PedagogicalAnnotator(
                         config=config,
-                        translator=translator,
+                        lexical_translator=lexical_translator,
                         progress=progress,
                     )
                 else:

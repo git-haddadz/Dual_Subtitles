@@ -27,11 +27,6 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--transcription-language", default="ar")
     process.add_argument("--translation-source-language", default="ar")
     process.add_argument("--translation-target-language", default="en")
-    process.add_argument(
-        "--translation-model",
-        default="Helsinki-NLP/opus-mt-ar-en",
-    )
-    process.add_argument("--alignment-model", default="bert-base-multilingual-cased")
     process.add_argument("--whisper-model", default="openai/whisper-large-v3")
     process.add_argument(
         "--diarization-model",
@@ -87,8 +82,6 @@ def _process(args: argparse.Namespace, temp_dir: Path) -> int:
         transcription_language=args.transcription_language,
         translation_source_language=args.translation_source_language,
         translation_target_language=args.translation_target_language,
-        translation_model=args.translation_model,
-        alignment_model=args.alignment_model,
         whisper_model=args.whisper_model,
         diarization_model=args.diarization_model,
         min_speech_duration=args.min_speech_duration,

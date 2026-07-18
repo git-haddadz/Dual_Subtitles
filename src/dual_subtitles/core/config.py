@@ -16,8 +16,6 @@ class ProcessingConfig:
     transcription_language: str = "ar"
     translation_source_language: str = "ar"
     translation_target_language: str = "en"
-    translation_model: str = "Helsinki-NLP/opus-mt-ar-en"
-    alignment_model: str = "bert-base-multilingual-cased"
     morphology_model: str = "auto"
     ner_model: str = "camel_tools"
     diacritization_model: str = "TigreGotico/catt-diacritizer"
@@ -92,13 +90,6 @@ class ProcessingConfig:
             if not 0 <= value <= 1:
                 msg = f"{name} must be between zero and one."
                 raise ValueError(msg)
-
-        if (
-            self.translation_target_language != "en"
-            and self.translation_model == "Helsinki-NLP/opus-mt-ar-en"
-        ):
-            msg = "A translation_model is required for non-English targets."
-            raise ValueError(msg)
 
         if not self.normalized_extension().strip("."):
             msg = "video_extension must contain a file extension."

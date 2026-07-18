@@ -31,11 +31,12 @@ from dual_subtitles.services.arabic import (
     tokenize_losslessly,
     transliterate_arabic,
 )
-from dual_subtitles.services.translation import NaturalTranslator
+from dual_subtitles.services.translation import LexicalTranslator
 
 LOGGER = logging.getLogger(__name__)
 ProgressCallback = Callable[[str, int, int], None]
 ENTITY_SIMILARITY_THRESHOLD = 0.88
+NAME_TRANSLITERATION_THRESHOLD = 0.45
 
 TARGET_TOKEN_PATTERN = re.compile(r"\w+(?:['’-]\w+)*", re.UNICODE)
 MAX_GLOSS_CHARACTERS = 40
@@ -77,13 +78,6 @@ class DiacritizationBackend(Protocol):
 
     def diacritize(self, text: str) -> tuple[str, float]:
         """Return vocalized text and a model confidence."""
-
-
-class AlignmentBackend(Protocol):
-    """Contextual source-target word aligner."""
-
-    def align(self, source: list[str], target: list[str]) -> dict[int, tuple[int, ...]]:
-        """Map source positions to target positions."""
 
 
 @dataclass(slots=True)
@@ -198,106 +192,14 @@ class CattDiacritizationBackend:
 
 
 @dataclass(slots=True)
-class ContextualWordAligner:
-    """Mutual-nearest contextual aligner using multilingual BERT embeddings."""
-
-    model_name: str = "bert-base-multilingual-cased"
-    device: int | str | None = None
-    similarity_threshold: float = 0.40
-    _tokenizer: Any = field(default=None, init=False, repr=False)
-    _model: Any = field(default=None, init=False, repr=False)
-    _torch_device: str = field(default="cpu", init=False, repr=False)
-
-    def _load(self) -> None:
-        if self._model is not None:
-            return
-        import torch
-        from transformers import AutoModel, AutoTokenizer
-
-        if self.device is None:
-            self._torch_device = "cuda" if torch.cuda.is_available() else "cpu"
-        elif isinstance(self.device, int):
-            self._torch_device = f"cuda:{self.device}"
-        else:
-            self._torch_device = str(self.device)
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=True)
-        self._model = AutoModel.from_pretrained(self.model_name)
-        self._model.to(self._torch_device)
-        self._model.eval()
-
-    def _word_vectors(self, words: list[str]) -> Any:
-        import torch
-
-        assert self._model is not None
-        assert self._tokenizer is not None
-        encoded = self._tokenizer(
-            words,
-            is_split_into_words=True,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-        )
-        word_ids = encoded.word_ids()
-        inputs = {key: value.to(self._torch_device) for key, value in encoded.items()}
-        with torch.inference_mode():
-            output = self._model(**inputs, output_hidden_states=True)
-        hidden = torch.stack(output.hidden_states[-4:]).mean(dim=0)[0]
-        vectors = []
-        for word_index in range(len(words)):
-            positions = [
-                index for index, value in enumerate(word_ids) if value == word_index
-            ]
-            if positions:
-                vectors.append(hidden[positions].mean(dim=0))
-            else:
-                vectors.append(torch.zeros(hidden.shape[-1], device=hidden.device))
-        return torch.stack(vectors)
-
-    def align(self, source: list[str], target: list[str]) -> dict[int, tuple[int, ...]]:
-        """Align only high-confidence mutual-nearest lexical words."""
-        if not source or not target:
-            return {}
-        self._load()
-        import torch
-
-        source_vectors = torch.nn.functional.normalize(
-            self._word_vectors(source),
-            dim=1,
-        )
-        target_vectors = torch.nn.functional.normalize(
-            self._word_vectors(target),
-            dim=1,
-        )
-        similarities = source_vectors @ target_vectors.T
-        source_best = similarities.argmax(dim=1)
-        target_best = similarities.argmax(dim=0)
-        alignments: dict[int, list[int]] = {}
-        for source_index, target_index_tensor in enumerate(source_best):
-            target_index = int(target_index_tensor)
-            score = float(similarities[source_index, target_index])
-            if score < self.similarity_threshold:
-                continue
-            if int(target_best[target_index]) == source_index:
-                alignments[source_index] = [target_index]
-        return {index: tuple(values) for index, values in alignments.items()}
-
-    def release(self) -> None:
-        """Release mBERT after all subtitle alignments are available."""
-        self._model = None
-        self._tokenizer = None
-        _empty_cuda_cache()
-
-
-@dataclass(slots=True)
 class PedagogicalAnnotator:
     """Annotate a complete transcript before any ASS rendering starts."""
 
     config: ProcessingConfig
-    translator: NaturalTranslator
+    lexical_translator: LexicalTranslator
     morphology: MorphologyBackend | None = None
     ner: NerBackend | None = None
     diacritizer: DiacritizationBackend | None = None
-    aligner: AlignmentBackend | None = None
     progress: ProgressCallback | None = None
 
     def __post_init__(self) -> None:
@@ -317,11 +219,6 @@ class PedagogicalAnnotator:
         if self.diacritizer is None:
             self.diacritizer = CattDiacritizationBackend(
                 self.config.diacritization_model
-            )
-        if self.aligner is None:
-            self.aligner = ContextualWordAligner(
-                self.config.alignment_model,
-                self.config.device,
             )
 
     def _gpu_enabled(self) -> bool:
@@ -354,20 +251,16 @@ class PedagogicalAnnotator:
             for index, segment in enumerate(segments)
         ]
         self._build_contexts(subtitles)
-        self._translate(subtitles)
-        _release_backend(self.translator)
         self._annotate_morphology(subtitles)
         self._diacritize(subtitles)
         _release_backend(self.diacritizer)
         entity_ranges = self._recognize_entities(subtitles)
         _release_backend(self.ner)
-        self._align_subtitles(subtitles)
-        _release_backend(self.aligner)
-        entity_ranges = self._validate_entity_ranges(subtitles, entity_ranges)
         video = AnnotatedVideo(subtitles=subtitles)
+        self._build_glosses(video)
+        entity_ranges = self._validate_entity_ranges(subtitles, entity_ranges)
         self._build_entity_memory(video, entity_ranges)
-        self._build_glosses(video, entity_ranges)
-        _release_backend(self.translator)
+        self._build_spans(video, entity_ranges)
         self._validate(video)
         return video
 
@@ -393,17 +286,6 @@ class PedagogicalAnnotator:
                 accepted.append(candidate)
                 budget += candidate_size
             subtitle.context_indices = tuple(sorted(accepted))
-
-    def _translate(self, subtitles: list[AnnotatedSubtitle]) -> None:
-        texts = [subtitle.segment.text.replace("\n", " ") for subtitle in subtitles]
-        translations = self.translator.translate_batch(texts)
-        for index, (subtitle, translation) in enumerate(
-            zip(subtitles, translations, strict=True),
-            start=1,
-        ):
-            subtitle.natural_translation = translation
-            subtitle.target_tokens = TARGET_TOKEN_PATTERN.findall(translation)
-            self._report("translation", index, len(subtitles))
 
     def _annotate_morphology(self, subtitles: list[AnnotatedSubtitle]) -> None:
         assert self.morphology is not None
@@ -534,23 +416,12 @@ class PedagogicalAnnotator:
                 record = _matching_entity(records, key, entity_type)
                 if record is None:
                     entity_id = f"entity:{len(records)}"
-                    target_indices = sorted(
-                        {
-                            target_index
-                            for word_index in range(start, end)
-                            for target_index in subtitle.alignments.get(
-                                word_index,
-                                (),
-                            )
-                        }
-                    )
-                    aligned_name = " ".join(
-                        subtitle.target_tokens[target_index]
-                        for target_index in target_indices
-                    )
+                    translated_name = " ".join(
+                        token.gloss or "" for token in entity_tokens
+                    ).strip()
                     target_name = (
-                        aligned_name
-                        if _is_plausible_entity_target(aligned_name)
+                        translated_name
+                        if _is_plausible_entity_target(translated_name)
                         else ""
                     ) or transliterate_arabic(
                         " ".join(token.display_surface for token in entity_tokens)
@@ -574,110 +445,55 @@ class PedagogicalAnnotator:
     def _build_glosses(
         self,
         video: AnnotatedVideo,
-        entity_ranges: dict[int, list[tuple[int, int, EntityType]]],
     ) -> None:
         subtitles = video.subtitles
         for position, subtitle in enumerate(subtitles, start=1):
             words = lexical_tokens(subtitle.tokens)
-            alignment = subtitle.alignments
 
             fallback_candidates: dict[int, list[str]] = {}
             lexical_inputs: list[str] = []
             for word_index, token in enumerate(words):
-                if token.entity_id is not None:
-                    continue
-                candidates = list(
-                    dict.fromkeys(
-                        candidate
-                        for candidate in (token.surface, token.lemma)
-                        if candidate
-                    )
-                )
+                candidates = [token.surface]
                 fallback_candidates[word_index] = candidates
                 lexical_inputs.extend(candidates)
             lexical_outputs = _translate_lexical_batch(
-                self.translator,
+                self.lexical_translator,
                 lexical_inputs,
             )
             translated_candidates: dict[str, str] = dict(
                 zip(lexical_inputs, lexical_outputs, strict=True)
             )
             for word_index, token in enumerate(words):
-                target_indices = alignment.get(word_index, ())
-                token.target_indices = target_indices
-                if token.entity_id is not None:
-                    entity = video.entities[token.entity_id]
-                    token.gloss = entity.canonical_target
-                    gloss_confidence = entity.confidence
-                elif target_indices:
-                    aligned_gloss = _sanitize_gloss(
-                        " ".join(
-                            subtitle.target_tokens[index] for index in target_indices
-                        )
-                    )
-                    if aligned_gloss:
-                        token.gloss = aligned_gloss
-                        gloss_confidence = 0.78
-                    else:
-                        token.target_indices = ()
-                        token.gloss = _fallback_gloss(
-                            token,
-                            fallback_candidates.get(word_index, []),
-                            translated_candidates,
-                        )
-                        gloss_confidence = 0.48
-                else:
-                    token.gloss = _fallback_gloss(
-                        token,
-                        fallback_candidates.get(word_index, []),
-                        translated_candidates,
-                    )
-                    gloss_confidence = 0.48
-                confidence_with_alignment = replace(
+                token.gloss = _fallback_gloss(
+                    token,
+                    fallback_candidates.get(word_index, []),
+                    translated_candidates,
+                )
+                gloss_confidence = 0.82
+                confidence_with_gloss = replace(
                     token.confidence,
-                    alignment=0.75 if target_indices else 0.25,
                     gloss=gloss_confidence,
                 )
                 token.confidence = replace(
-                    confidence_with_alignment,
+                    confidence_with_gloss,
                     overall=_overall_confidence(
-                        confidence_with_alignment,
+                        confidence_with_gloss,
                         gloss_confidence,
                     ),
                 )
+            self._report("glosses", position, len(subtitles))
+
+    def _build_spans(
+        self,
+        video: AnnotatedVideo,
+        entity_ranges: dict[int, list[tuple[int, int, EntityType]]],
+    ) -> None:
+        for subtitle in video.subtitles:
             subtitle.spans = _build_spans(
                 subtitle,
                 entity_ranges[subtitle.subtitle_index],
                 video.entities,
             )
-            self._report("glosses", position, len(subtitles))
-
-    def _align_subtitles(self, subtitles: list[AnnotatedSubtitle]) -> None:
-        assert self.aligner is not None
-        for position, subtitle in enumerate(subtitles, start=1):
-            words = lexical_tokens(subtitle.tokens)
-            try:
-                raw_alignment = self.aligner.align(
-                    [token.surface for token in words],
-                    subtitle.target_tokens,
-                )
-                used_targets: set[int] = set()
-                for source_index in range(len(words)):
-                    targets = tuple(
-                        dict.fromkeys(
-                            target_index
-                            for target_index in raw_alignment.get(source_index, ())
-                            if 0 <= target_index < len(subtitle.target_tokens)
-                            and target_index not in used_targets
-                        )
-                    )
-                    if targets:
-                        subtitle.alignments[source_index] = targets
-                        used_targets.update(targets)
-            except Exception as exc:  # noqa: BLE001 - lexical MT remains available.
-                LOGGER.warning("Contextual alignment unavailable: %s", exc)
-                subtitle.warnings.append("alignment_unavailable")
-            self._report("alignment", position, len(subtitles))
 
     def _validate_entity_ranges(
         self,
@@ -701,21 +517,20 @@ class PedagogicalAnnotator:
             accepted: list[tuple[int, int, EntityType]] = []
             for entity_range in entity_ranges[subtitle.subtitle_index]:
                 start, end, entity_type = entity_range
-                target_indices = sorted(
-                    {
-                        target_index
-                        for word_index in range(start, end)
-                        for target_index in subtitle.alignments.get(word_index, ())
-                    }
-                )
-                aligned_name = " ".join(
-                    subtitle.target_tokens[index] for index in target_indices
-                )
+                entity_tokens = words[start:end]
+                translated_name = " ".join(
+                    token.gloss or "" for token in entity_tokens
+                ).strip()
                 key = consonantal_key(
-                    " ".join(token.surface for token in words[start:end])
+                    " ".join(token.surface for token in entity_tokens)
                 )
                 corroborated = frequencies.get((key, entity_type), 0) > 1
-                if _is_plausible_entity_target(aligned_name) or corroborated:
+                credible_name = _is_plausible_entity_target(translated_name)
+                if entity_type is EntityType.PERSON:
+                    credible_name = credible_name and _person_name_matches(
+                        entity_tokens
+                    )
+                if credible_name or (corroborated and translated_name):
                     accepted.append(entity_range)
                     continue
                 for token in words[start:end]:
@@ -804,19 +619,6 @@ def _source_context(
     return words, current_start
 
 
-def _target_context(
-    subtitles: list[AnnotatedSubtitle],
-    current: AnnotatedSubtitle,
-) -> tuple[list[str], int]:
-    words: list[str] = []
-    current_start = 0
-    for subtitle_index in current.context_indices:
-        if subtitle_index == current.subtitle_index:
-            current_start = len(words)
-        words.extend(subtitles[subtitle_index].target_tokens)
-    return words, current_start
-
-
 def _bounded_score(value: float) -> float:
     if not math.isfinite(value):
         return 0.0
@@ -887,7 +689,7 @@ def _matching_entity(
 
 
 def _is_plausible_entity_target(text: str) -> bool:
-    """Accept aligned Latin proper names, not generic labels or stopwords."""
+    """Accept Latin proper names, not generic labels or stopwords."""
     if not text or "_" in text:
         return False
     words = TARGET_TOKEN_PATTERN.findall(text)
@@ -901,15 +703,38 @@ def _is_plausible_entity_target(text: str) -> bool:
     return bool(significant) and all(word[0].isupper() for word in significant)
 
 
+def _person_name_matches(tokens: list[AnnotatedToken]) -> bool:
+    """Reject PERSON spans whose Google gloss is not a transliterated name."""
+    if not tokens:
+        return False
+    for token in tokens:
+        source_name = _latin_key(transliterate_arabic(token.display_surface))
+        target_name = _latin_key(token.gloss or "")
+        if not source_name or not target_name:
+            return False
+        similarity = SequenceMatcher(None, source_name, target_name).ratio()
+        if similarity < NAME_TRANSLITERATION_THRESHOLD:
+            return False
+    return True
+
+
+def _latin_key(text: str) -> str:
+    """Return an accent-insensitive comparison key for transliterated names."""
+    replacements = str.maketrans({"ā": "a", "ḥ": "h", "ḍ": "d", "ṣ": "s", "ṭ": "t"})
+    normalized = text.casefold().translate(replacements)
+    return "".join(
+        character
+        for character in normalized
+        if character.isascii() and character.isalnum()
+    )
+
+
 def _translate_lexical_batch(
-    translator: NaturalTranslator,
+    translator: LexicalTranslator,
     words: list[str],
 ) -> list[str]:
-    """Use bounded lexical decoding while retaining injected-client support."""
-    translate_words = getattr(translator, "translate_words", None)
-    if callable(translate_words):
-        return list(translate_words(words))
-    return translator.translate_batch(words)
+    """Translate displayed glosses through the configured lexical backend."""
+    return translator.translate_words(words)
 
 
 def _sanitize_gloss(value: str, *, max_words: int = MAX_GLOSS_WORDS) -> str:
@@ -994,11 +819,10 @@ def _overall_confidence(
     gloss_confidence: float,
 ) -> float:
     values = [
-        (confidence.morphology, 0.15),
-        (confidence.diacritization, 0.15),
-        (confidence.ner, 0.10),
-        (confidence.alignment, 0.35),
-        (gloss_confidence, 0.25),
+        (confidence.morphology, 0.20),
+        (confidence.diacritization, 0.20),
+        (confidence.ner, 0.15),
+        (gloss_confidence, 0.45),
     ]
     present = [(value, weight) for value, weight in values if value > 0]
     if not present:
@@ -1063,7 +887,6 @@ def _build_spans(
                 display_source=display_words[index],
                 gloss=token.gloss or token.surface,
                 transliteration=token.transliteration,
-                target_indices=token.target_indices,
                 confidence=token.confidence,
                 warnings=list(token.warnings),
             )
@@ -1073,11 +896,9 @@ def _build_spans(
 
 
 __all__ = [
-    "AlignmentBackend",
     "CamelMorphologyBackend",
     "CamelNerBackend",
     "CattDiacritizationBackend",
-    "ContextualWordAligner",
     "DiacritizationBackend",
     "MorphologyBackend",
     "NerBackend",

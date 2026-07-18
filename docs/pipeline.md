@@ -10,10 +10,9 @@ Video
   -> audio, diarisation et transcription complete
   -> SRT disponible immediatement
   -> tokenisation non destructive et contextes
-  -> traduction naturelle interne
   -> morphologie et diacritisation
   -> NER, translitteration et memoire d'entites
-  -> alignement et glosses contextualisees
+  -> glosses Google quasi mot a mot
   -> validation
   -> rendu ASS
 ```
@@ -27,8 +26,7 @@ specialises pour une source arabe.
 `ProcessingConfig` centralise les chemins, langues, modeles, seuils, fenetres
 contextuelles et parametres de rendu. Les valeurs par defaut importantes sont:
 
-- traduction locale `Helsinki-NLP/opus-mt-ar-en`;
-- alignement `bert-base-multilingual-cased`;
+- glosses Google Translate via `deep-translator`;
 - morphologie et NER CAMeL Tools;
 - diacritisation CATT;
 - deux sous-titres de contexte avant et apres, sans franchir une pause de huit
@@ -36,8 +34,7 @@ contextuelles et parametres de rendu. Les valeurs par defaut importantes sont:
 - seuil de diacritisation visible de `0.78`;
 - source 64 px et glose 28 px sur une base `1280x720`.
 
-Une cible autre que l'anglais exige un `translation_model` explicite. Les
-valeurs invalides sont refusees avant le chargement des modeles.
+Les valeurs invalides sont refusees avant le chargement des modeles.
 
 `process_directory(...)` trie les videos, charge les services lourds au premier
 besoin et isole les erreurs par video. `skip_existing` conserve les sorties non
@@ -46,8 +43,7 @@ regenerer l'ASS, sans relancer Whisper ou pyannote.
 
 Le callback `on_video_complete` annonce chaque fichier termine. Le callback
 `on_progress(video, stage, current, total)` expose en direct les etapes
-`translation`, `morphology`, `diacritization`, `ner`, `alignment`, `glosses` et
-`validation` et `ass`.
+`morphology`, `diacritization`, `ner`, `glosses`, `validation` et `ass`.
 
 ## 2. Audio, Diarisation Et Transcription
 
@@ -69,9 +65,9 @@ laisse donc une transcription testable et n'interrompt pas les autres videos.
 Le remplacement structure de l'ancien `WordPair` repose sur:
 
 - `AnnotatedToken`: surface exacte, offsets, type, morphologie, forme vocalisee,
-  entite, translitteration, glose, alignements et confiances;
+  entite, translitteration, glose et confiances;
 - `AnnotatedSpan`: intervalle lexical affiche comme une seule paire;
-- `AnnotatedSubtitle`: segment, tokens, contextes et traduction interne;
+- `AnnotatedSubtitle`: segment, tokens et contextes;
 - `AnnotatedVideo`: transcription annotee et memoire d'entites.
 
 `WordPair` et `InterlinearTranslator` restent uniquement comme adaptateurs de
@@ -85,18 +81,16 @@ ces offsets. La reconstruction doit etre strictement identique a la sortie
 Whisper; aucune normalisation ne remplace la surface affichee.
 
 Chaque sous-titre reference une fenetre bornee de voisins. Ces tokens de
-contexte alimentent la desambiguisation morphologique et le NER. L'alignement
-final reste limite au sous-titre courant afin d'eviter qu'un mot soit associe a
-la traduction d'une phrase voisine.
+contexte alimentent la desambiguisation morphologique et le NER.
 
-## 5. Traduction Naturelle Interne
+## 5. Traduction Lexicale
 
-Marian traduit localement chaque sous-titre en lots et met les resultats en
-cache. Cette phrase naturelle sert d'ancrage semantique et n'est jamais rendue
-dans l'ASS. Le meme moteur utilise un mode lexical separe et borne a 16 tokens
-pour les mots non alignes. Les sorties vides, repetitives, ponctuationnelles ou
-trop longues sont rejetees; le mot source est alors conserve. Aucun texte n'est
-envoye vers une API distante.
+Les glosses affichees sont traduites mot par mot avec Google Translate via
+`deep-translator`, comme dans la pipeline d'origine, puis mises en cache. Ce
+service ne demande ni compte ni cle API, mais necessite une connexion et peut
+appliquer ses propres limitations. Une erreur est consignee dans les logs et
+conserve le mot source. Les sorties vides, repetitives, ponctuationnelles ou
+trop longues sont egalement rejetees.
 
 ## 6. Morphologie Et Diacritisation
 
@@ -123,7 +117,7 @@ Le NER CAMeL produit des etiquettes BIO fusionnees en spans `PERSON`,
 `LOCATION`, `ORGANIZATION` ou `MISC`. Les variantes sont rapprochees au niveau
 de la video avec une cle consonantique, le type et une similarite prudente.
 
-Une forme latine fiable et correctement alignee devient la forme canonique.
+Une forme latine Google compatible avec la translitteration devient la forme canonique.
 Les etiquettes NER isolees sans nom propre cible credible sont rejetees; une
 entite repetee dans la video peut aussi servir de corroboration. Sinon, le
 systeme translittere la forme vocalisee avec une notation lisible (`sh`, `kh`,
@@ -132,11 +126,9 @@ ne s'agit ni d'un glossaire fixe ni d'une memoire utilisateur.
 
 ## 8. Glosses Et Validation
 
-Un aligner mutual-nearest compare les embeddings mBERT des mots source et cible
-du sous-titre. Son seuil est volontairement strict et un token cible ne peut
-pas etre reutilise par plusieurs mots source. Un mot non aligne recoit un
-candidat local court issu de sa surface ou de son lemme. Une entite validee
-recoit sa translitteration canonique.
+Chaque mot recoit directement la traduction Google de sa surface, comme dans
+la pipeline d'origine. Une entite validee recoit sa forme latine canonique ou
+sa translitteration locale.
 
 Chaque mot lexical produit un span `TOKEN`. Seules une entite NER ou une
 expression indivisible explicitement reconnue peut devenir un span multi-token.
@@ -146,7 +138,7 @@ source voisine dans le rendu.
 
 Avant le rendu, la validation controle la reconstruction, les chevauchements,
 la couverture lexicale, les glosses vides et la coherence des entites. Les
-confiances de morphologie, diacritisation, NER, alignement et glose restent dans
+confiances de morphologie, diacritisation, NER et glose restent dans
 les objets et les logs; aucun symbole parasite n'est affiche.
 
 ## 9. Rendu ASS Pedagogique
@@ -180,8 +172,8 @@ camel_data -i ner-arabert
 
 Le notebook verifie les versions, installe ces donnees une fois, redemarre
 uniquement apres un changement d'environnement puis affiche chaque etape en
-direct. Les modeles Hugging Face et CATT sont telecharges au premier usage et
-restent dans leurs caches locaux.
+direct. Les modeles Whisper, pyannote, CAMeL et CATT sont telecharges au premier
+usage et restent dans leurs caches locaux.
 
 ## 11. Verification
 
@@ -195,5 +187,5 @@ pytest
 ```
 
 Les controles couvrent notamment la tokenisation non destructive, les limites
-de contexte, la diacritisation prudente, les entites repetees, les alignements
-un-vers-plusieurs et le centrage des evenements ASS.
+de contexte, la diacritisation prudente, les entites repetees, les replis de
+traduction et le centrage des evenements ASS.
