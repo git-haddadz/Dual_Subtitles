@@ -85,15 +85,18 @@ ces offsets. La reconstruction doit etre strictement identique a la sortie
 Whisper; aucune normalisation ne remplace la surface affichee.
 
 Chaque sous-titre reference une fenetre bornee de voisins. Ces tokens de
-contexte alimentent la desambiguisation morphologique, le NER et les embeddings
-d'alignement, tout en ne produisant une sortie que pour le sous-titre courant.
+contexte alimentent la desambiguisation morphologique et le NER. L'alignement
+final reste limite au sous-titre courant afin d'eviter qu'un mot soit associe a
+la traduction d'une phrase voisine.
 
 ## 5. Traduction Naturelle Interne
 
 Marian traduit localement chaque sous-titre en lots et met les resultats en
 cache. Cette phrase naturelle sert d'ancrage semantique et n'est jamais rendue
-dans l'ASS. Le meme moteur produit des candidats de repli pour les mots non
-alignes. Aucun texte n'est envoye vers une API distante.
+dans l'ASS. Le meme moteur utilise un mode lexical separe et borne a 16 tokens
+pour les mots non alignes. Les sorties vides, repetitives, ponctuationnelles ou
+trop longues sont rejetees; le mot source est alors conserve. Aucun texte n'est
+envoye vers une API distante.
 
 ## 6. Morphologie Et Diacritisation
 
@@ -120,21 +123,26 @@ Le NER CAMeL produit des etiquettes BIO fusionnees en spans `PERSON`,
 `LOCATION`, `ORGANIZATION` ou `MISC`. Les variantes sont rapprochees au niveau
 de la video avec une cle consonantique, le type et une similarite prudente.
 
-Une forme latine fiable trouvee dans la traduction naturelle devient la forme
-canonique. Sinon, le systeme translittere la forme vocalisee avec une notation
-lisible (`sh`, `kh`, `gh`, `q`, `ʿ`, `ā`, etc.). Cette forme est reutilisee dans
-toute la video. Il ne s'agit ni d'un glossaire fixe ni d'une memoire utilisateur.
+Une forme latine fiable et correctement alignee devient la forme canonique.
+Les etiquettes NER isolees sans nom propre cible credible sont rejetees; une
+entite repetee dans la video peut aussi servir de corroboration. Sinon, le
+systeme translittere la forme vocalisee avec une notation lisible (`sh`, `kh`,
+`gh`, `q`, `ʿ`, `ā`, etc.). Cette forme est reutilisee dans toute la video. Il
+ne s'agit ni d'un glossaire fixe ni d'une memoire utilisateur.
 
 ## 8. Glosses Et Validation
 
-Un aligner mutual-nearest/IterMax compare les embeddings mBERT des mots source
-et cible dans leurs fenetres. Il accepte les alignements contigus
-un-vers-plusieurs. Un mot non aligne recoit un candidat local issu de sa surface
-ou de son lemme. Une entite recoit sa translitteration canonique.
+Un aligner mutual-nearest compare les embeddings mBERT des mots source et cible
+du sous-titre. Son seuil est volontairement strict et un token cible ne peut
+pas etre reutilise par plusieurs mots source. Un mot non aligne recoit un
+candidat local court issu de sa surface ou de son lemme. Une entite validee
+recoit sa translitteration canonique.
 
 Chaque mot lexical produit un span `TOKEN`. Seules une entite NER ou une
 expression indivisible explicitement reconnue peut devenir un span multi-token.
 La sortie reste donc quasi mot a mot et adaptee a l'apprentissage du vocabulaire.
+La ponctuation n'est jamais traduite seule: elle reste rattachee a la surface
+source voisine dans le rendu.
 
 Avant le rendu, la validation controle la reconstruction, les chevauchements,
 la couverture lexicale, les glosses vides et la coherence des entites. Les

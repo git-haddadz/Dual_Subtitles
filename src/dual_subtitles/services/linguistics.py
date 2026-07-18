@@ -37,7 +37,25 @@ LOGGER = logging.getLogger(__name__)
 ProgressCallback = Callable[[str, int, int], None]
 ENTITY_SIMILARITY_THRESHOLD = 0.88
 
-TARGET_TOKEN_PATTERN = re.compile(r"\w+(?:['’-]\w+)*|[^\w\s]", re.UNICODE)
+TARGET_TOKEN_PATTERN = re.compile(r"\w+(?:['’-]\w+)*", re.UNICODE)
+MAX_GLOSS_CHARACTERS = 40
+MAX_GLOSS_WORDS = 4
+MIN_REPETITION_CHECK_WORDS = 3
+MIN_GLOSS_UNIQUENESS_RATIO = 0.6
+ENTITY_TARGET_STOPWORDS = {
+    "a",
+    "an",
+    "he",
+    "her",
+    "him",
+    "i",
+    "it",
+    "she",
+    "the",
+    "they",
+    "we",
+    "you",
+}
 
 
 class MorphologyBackend(Protocol):
@@ -185,7 +203,7 @@ class ContextualWordAligner:
 
     model_name: str = "bert-base-multilingual-cased"
     device: int | str | None = None
-    similarity_threshold: float = 0.25
+    similarity_threshold: float = 0.40
     _tokenizer: Any = field(default=None, init=False, repr=False)
     _model: Any = field(default=None, init=False, repr=False)
     _torch_device: str = field(default="cpu", init=False, repr=False)
@@ -236,7 +254,7 @@ class ContextualWordAligner:
         return torch.stack(vectors)
 
     def align(self, source: list[str], target: list[str]) -> dict[int, tuple[int, ...]]:
-        """Align mutual nearest words and attach contiguous one-to-many matches."""
+        """Align only high-confidence mutual-nearest lexical words."""
         if not source or not target:
             return {}
         self._load()
@@ -261,33 +279,6 @@ class ContextualWordAligner:
                 continue
             if int(target_best[target_index]) == source_index:
                 alignments[source_index] = [target_index]
-        # IterMax-style second pass gives function words a chance while keeping
-        # every added target contiguous with an existing alignment.
-        for source_index in range(len(source)):
-            if source_index in alignments:
-                continue
-            ranked = torch.argsort(similarities[source_index], descending=True)
-            for candidate in ranked[:3]:
-                target_index = int(candidate)
-                if (
-                    float(similarities[source_index, target_index])
-                    < self.similarity_threshold
-                ):
-                    break
-                neighbours = alignments.get(source_index - 1, []) + alignments.get(
-                    source_index + 1,
-                    [],
-                )
-                is_adjacent = (
-                    min(
-                        (abs(target_index - item) for item in neighbours),
-                        default=0,
-                    )
-                    <= 1
-                )
-                if not neighbours or is_adjacent:
-                    alignments[source_index] = [target_index]
-                    break
         return {index: tuple(values) for index, values in alignments.items()}
 
     def release(self) -> None:
@@ -372,6 +363,7 @@ class PedagogicalAnnotator:
         _release_backend(self.ner)
         self._align_subtitles(subtitles)
         _release_backend(self.aligner)
+        entity_ranges = self._validate_entity_ranges(subtitles, entity_ranges)
         video = AnnotatedVideo(subtitles=subtitles)
         self._build_entity_memory(video, entity_ranges)
         self._build_glosses(video, entity_ranges)
@@ -558,11 +550,8 @@ class PedagogicalAnnotator:
                     )
                     target_name = (
                         aligned_name
-                        if _looks_like_latin_name(aligned_name)
-                        else _latin_name_from_translation(
-                            subtitle.natural_translation,
-                            source,
-                        )
+                        if _is_plausible_entity_target(aligned_name)
+                        else ""
                     ) or transliterate_arabic(
                         " ".join(token.display_surface for token in entity_tokens)
                     )
@@ -592,13 +581,27 @@ class PedagogicalAnnotator:
             words = lexical_tokens(subtitle.tokens)
             alignment = subtitle.alignments
 
-            unaligned = [
-                token.lemma or token.surface
-                for word_index, token in enumerate(words)
-                if word_index not in alignment and token.entity_id is None
-            ]
-            fallback_glosses = self.translator.translate_batch(unaligned)
-            fallback_iterator = iter(fallback_glosses)
+            fallback_candidates: dict[int, list[str]] = {}
+            lexical_inputs: list[str] = []
+            for word_index, token in enumerate(words):
+                if token.entity_id is not None:
+                    continue
+                candidates = list(
+                    dict.fromkeys(
+                        candidate
+                        for candidate in (token.surface, token.lemma)
+                        if candidate
+                    )
+                )
+                fallback_candidates[word_index] = candidates
+                lexical_inputs.extend(candidates)
+            lexical_outputs = _translate_lexical_batch(
+                self.translator,
+                lexical_inputs,
+            )
+            translated_candidates: dict[str, str] = dict(
+                zip(lexical_inputs, lexical_outputs, strict=True)
+            )
             for word_index, token in enumerate(words):
                 target_indices = alignment.get(word_index, ())
                 token.target_indices = target_indices
@@ -607,13 +610,27 @@ class PedagogicalAnnotator:
                     token.gloss = entity.canonical_target
                     gloss_confidence = entity.confidence
                 elif target_indices:
-                    token.gloss = " ".join(
-                        subtitle.target_tokens[index] for index in target_indices
+                    aligned_gloss = _sanitize_gloss(
+                        " ".join(
+                            subtitle.target_tokens[index] for index in target_indices
+                        )
                     )
-                    gloss_confidence = 0.78
+                    if aligned_gloss:
+                        token.gloss = aligned_gloss
+                        gloss_confidence = 0.78
+                    else:
+                        token.target_indices = ()
+                        token.gloss = _fallback_gloss(
+                            token,
+                            fallback_candidates.get(word_index, []),
+                            translated_candidates,
+                        )
+                        gloss_confidence = 0.48
                 else:
-                    token.gloss = (
-                        next(fallback_iterator, token.surface) or token.surface
+                    token.gloss = _fallback_gloss(
+                        token,
+                        fallback_candidates.get(word_index, []),
+                        translated_candidates,
                     )
                     gloss_confidence = 0.48
                 confidence_with_alignment = replace(
@@ -639,24 +656,75 @@ class PedagogicalAnnotator:
         assert self.aligner is not None
         for position, subtitle in enumerate(subtitles, start=1):
             words = lexical_tokens(subtitle.tokens)
-            source_context, source_start = _source_context(subtitles, subtitle)
-            target_context, target_start = _target_context(subtitles, subtitle)
             try:
-                context_alignment = self.aligner.align(source_context, target_context)
-                for source_index in range(source_start, source_start + len(words)):
+                raw_alignment = self.aligner.align(
+                    [token.surface for token in words],
+                    subtitle.target_tokens,
+                )
+                used_targets: set[int] = set()
+                for source_index in range(len(words)):
                     targets = tuple(
-                        target_index - target_start
-                        for target_index in context_alignment.get(source_index, ())
-                        if target_start
-                        <= target_index
-                        < target_start + len(subtitle.target_tokens)
+                        dict.fromkeys(
+                            target_index
+                            for target_index in raw_alignment.get(source_index, ())
+                            if 0 <= target_index < len(subtitle.target_tokens)
+                            and target_index not in used_targets
+                        )
                     )
                     if targets:
-                        subtitle.alignments[source_index - source_start] = targets
+                        subtitle.alignments[source_index] = targets
+                        used_targets.update(targets)
             except Exception as exc:  # noqa: BLE001 - lexical MT remains available.
                 LOGGER.warning("Contextual alignment unavailable: %s", exc)
                 subtitle.warnings.append("alignment_unavailable")
             self._report("alignment", position, len(subtitles))
+
+    def _validate_entity_ranges(
+        self,
+        subtitles: list[AnnotatedSubtitle],
+        entity_ranges: dict[int, list[tuple[int, int, EntityType]]],
+    ) -> dict[int, list[tuple[int, int, EntityType]]]:
+        """Reject isolated NER spans that have no credible proper-name anchor."""
+        frequencies: dict[tuple[str, EntityType], int] = {}
+        for subtitle in subtitles:
+            words = lexical_tokens(subtitle.tokens)
+            for start, end, entity_type in entity_ranges[subtitle.subtitle_index]:
+                key = consonantal_key(
+                    " ".join(token.surface for token in words[start:end])
+                )
+                frequency_key = (key, entity_type)
+                frequencies[frequency_key] = frequencies.get(frequency_key, 0) + 1
+
+        validated: dict[int, list[tuple[int, int, EntityType]]] = {}
+        for subtitle in subtitles:
+            words = lexical_tokens(subtitle.tokens)
+            accepted: list[tuple[int, int, EntityType]] = []
+            for entity_range in entity_ranges[subtitle.subtitle_index]:
+                start, end, entity_type = entity_range
+                target_indices = sorted(
+                    {
+                        target_index
+                        for word_index in range(start, end)
+                        for target_index in subtitle.alignments.get(word_index, ())
+                    }
+                )
+                aligned_name = " ".join(
+                    subtitle.target_tokens[index] for index in target_indices
+                )
+                key = consonantal_key(
+                    " ".join(token.surface for token in words[start:end])
+                )
+                corroborated = frequencies.get((key, entity_type), 0) > 1
+                if _is_plausible_entity_target(aligned_name) or corroborated:
+                    accepted.append(entity_range)
+                    continue
+                for token in words[start:end]:
+                    token.entity_type = None
+                    token.confidence = replace(token.confidence, ner=0.0)
+                    token.warnings.append("uncorroborated_entity")
+                subtitle.warnings.append("uncorroborated_entity")
+            validated[subtitle.subtitle_index] = accepted
+        return validated
 
     def _validate(self, video: AnnotatedVideo) -> None:
         for position, subtitle in enumerate(video.subtitles, start=1):
@@ -818,21 +886,107 @@ def _matching_entity(
     return None
 
 
-def _latin_name_from_translation(translation: str, source: str) -> str:
-    del source
-    candidates = [
-        candidate
-        for candidate in re.findall(
-            r"\b[A-Z][\w'’-]*(?:\s+[A-Z][\w'’-]*)*",
-            translation,
-        )
-        if candidate not in {"A", "I", "The"}
+def _is_plausible_entity_target(text: str) -> bool:
+    """Accept aligned Latin proper names, not generic labels or stopwords."""
+    if not text or "_" in text:
+        return False
+    words = TARGET_TOKEN_PATTERN.findall(text)
+    if not words or any(not re.search(r"[A-Za-z]", word) for word in words):
+        return False
+    if all(word.casefold() in ENTITY_TARGET_STOPWORDS for word in words):
+        return False
+    significant = [
+        word for word in words if word.casefold() not in ENTITY_TARGET_STOPWORDS
     ]
-    return max(candidates, key=len, default="")
+    return bool(significant) and all(word[0].isupper() for word in significant)
 
 
-def _looks_like_latin_name(text: str) -> bool:
-    return bool(text and re.search(r"[A-Za-z]", text))
+def _translate_lexical_batch(
+    translator: NaturalTranslator,
+    words: list[str],
+) -> list[str]:
+    """Use bounded lexical decoding while retaining injected-client support."""
+    translate_words = getattr(translator, "translate_words", None)
+    if callable(translate_words):
+        return list(translate_words(words))
+    return translator.translate_batch(words)
+
+
+def _sanitize_gloss(value: str, *, max_words: int = MAX_GLOSS_WORDS) -> str:
+    """Keep a short lexical gloss and reject generation artefacts."""
+    if not value or r"\N" in value or "\n" in value or "\r" in value:
+        return ""
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    cleaned = cleaned.strip(".,;:!?…،؛؟ ")
+    cleaned = re.sub(r"([.!?…])(?:\s*\1)+$", r"\1", cleaned).strip()
+    invalid_shape = (
+        not cleaned
+        or "_" in cleaned
+        or len(cleaned) > MAX_GLOSS_CHARACTERS
+        or not re.search(r"\w", cleaned, re.UNICODE)
+        or bool(re.search(r"(.)\1{4,}", cleaned, re.IGNORECASE))
+    )
+    if invalid_shape:
+        return ""
+    words = cleaned.split()
+    if len(words) > max_words:
+        return ""
+    normalized = [word.casefold().strip(".,;:!?…") for word in words]
+    if (
+        len(normalized) >= MIN_REPETITION_CHECK_WORDS
+        and len(set(normalized)) / len(normalized) < MIN_GLOSS_UNIQUENESS_RATIO
+    ):
+        return ""
+    return cleaned
+
+
+def _fallback_gloss(
+    token: AnnotatedToken,
+    candidates: list[str],
+    translations: dict[str, str],
+) -> str:
+    """Choose the first safe lexical candidate or preserve the source word."""
+    for candidate in candidates:
+        gloss = _sanitize_gloss(translations.get(candidate, ""), max_words=3)
+        if gloss:
+            return gloss
+    token.warnings.append("unsafe_lexical_translation")
+    return token.surface
+
+
+def _display_words_with_punctuation(subtitle: AnnotatedSubtitle) -> list[str]:
+    """Attach source punctuation to neighbouring words without glossing it."""
+    words = lexical_tokens(subtitle.tokens)
+    displays = [token.display_surface for token in words]
+    if not words:
+        return displays
+    lexical_positions = {token.token_index: index for index, token in enumerate(words)}
+    for token_position, token in enumerate(subtitle.tokens):
+        if token.token_index in lexical_positions:
+            continue
+        previous = next(
+            (
+                candidate
+                for candidate in reversed(subtitle.tokens[:token_position])
+                if candidate.token_index in lexical_positions
+            ),
+            None,
+        )
+        following = next(
+            (
+                candidate
+                for candidate in subtitle.tokens[token_position + 1 :]
+                if candidate.token_index in lexical_positions
+            ),
+            None,
+        )
+        if previous is None and following is not None:
+            displays[lexical_positions[following.token_index]] = (
+                token.surface + displays[lexical_positions[following.token_index]]
+            )
+        elif previous is not None:
+            displays[lexical_positions[previous.token_index]] += token.surface
+    return displays
 
 
 def _overall_confidence(
@@ -860,6 +1014,7 @@ def _build_spans(
     entities: dict[str, EntityRecord],
 ) -> list[AnnotatedSpan]:
     words = lexical_tokens(subtitle.tokens)
+    display_words = _display_words_with_punctuation(subtitle)
     entity_by_start = {
         start: (end, entity_type) for start, end, entity_type in entity_ranges
     }
@@ -878,8 +1033,12 @@ def _build_spans(
                     token_start=index,
                     token_end=end,
                     kind=SpanKind.ENTITY,
-                    source_surface=" ".join(token.surface for token in grouped),
-                    display_source=" ".join(token.display_surface for token in grouped),
+                    source_surface=" ".join(
+                        display_words[word_index] for word_index in range(index, end)
+                    ),
+                    display_source=" ".join(
+                        display_words[word_index] for word_index in range(index, end)
+                    ),
                     gloss=record.canonical_target,
                     transliteration=record.canonical_target,
                     entity_id=record.entity_id,
@@ -900,8 +1059,8 @@ def _build_spans(
                 token_start=index,
                 token_end=index + 1,
                 kind=SpanKind.TOKEN,
-                source_surface=token.surface,
-                display_source=token.display_surface,
+                source_surface=display_words[index],
+                display_source=display_words[index],
                 gloss=token.gloss or token.surface,
                 transliteration=token.transliteration,
                 target_indices=token.target_indices,

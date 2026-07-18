@@ -23,6 +23,7 @@ from dual_subtitles.services.linguistics import PedagogicalAnnotator
 
 EXPECTED_EVENT_COUNT = 6
 MULTI_TOKEN_ENTITY_LENGTH = 2
+MAX_EXPECTED_GLOSS_LENGTH = 40
 
 
 class FakeTranslator:
@@ -204,13 +205,21 @@ def test_only_ner_ranges_create_multi_token_entity_spans(tmp_path: Path) -> None
         def diacritize(self, text: str) -> tuple[str, float]:
             return text, 0.1
 
+    class NameAligner:
+        def align(
+            self,
+            _source: list[str],
+            _target: list[str],
+        ) -> dict[int, tuple[int, ...]]:
+            return {0: (0,), 1: (1,), 2: (2,), 3: (3,)}
+
     annotator = PedagogicalAnnotator(
         config=make_config(tmp_path),
         translator=FourWordTranslator(),
         morphology=FakeMorphology(),
         diacritizer=NoopDiacritizer(),
         ner=MultiTokenNer(),
-        aligner=FakeAligner(),
+        aligner=NameAligner(),
     )
     video = annotator.annotate([SubtitleSegment(0, 1, "أنا قابلت جون سميث")])
 
@@ -223,6 +232,146 @@ def test_only_ner_ranges_create_multi_token_entity_spans(tmp_path: Path) -> None
     assert spans[-1].token_end - spans[-1].token_start == MULTI_TOKEN_ENTITY_LENGTH
     assert spans[-1].confidence.ner > 0
     assert video.entities[spans[-1].entity_id or ""].entity_type is EntityType.PERSON
+
+
+def test_pathological_lexical_outputs_fall_back_and_keep_punctuation(
+    tmp_path: Path,
+) -> None:
+    class RegressionTranslator:
+        def translate_batch(self, texts: list[str]) -> list[str]:
+            return ["Truth, beam!" for _ in texts]
+
+        def translate_words(self, words: list[str]) -> list[str]:
+            bad_outputs = [".", "Uh " * 100]
+            return [
+                bad_outputs[index % len(bad_outputs)] for index, _ in enumerate(words)
+            ]
+
+    class NoEntities:
+        def predict(self, words: list[str]) -> list[str]:
+            return ["O"] * len(words)
+
+    class NoAlignment:
+        def align(
+            self,
+            _source: list[str],
+            _target: list[str],
+        ) -> dict[int, tuple[int, ...]]:
+            return {}
+
+    class NoopDiacritizer:
+        def diacritize(self, text: str) -> tuple[str, float]:
+            return text, 0.1
+
+    annotator = PedagogicalAnnotator(
+        config=make_config(tmp_path),
+        translator=RegressionTranslator(),
+        morphology=FakeMorphology(),
+        diacritizer=NoopDiacritizer(),
+        ner=NoEntities(),
+        aligner=NoAlignment(),
+    )
+    video = annotator.annotate(
+        [
+            SubtitleSegment(
+                0, 1, "\u0635\u062f\u0642 \u0634\u0639\u0627\u0639\u0627\u064b!"
+            )
+        ]
+    )
+
+    subtitle = video.subtitles[0]
+    assert subtitle.target_tokens == ["Truth", "beam"]
+    assert [span.gloss for span in subtitle.spans] == [
+        "\u0635\u062f\u0642",
+        "\u0634\u0639\u0627\u0639\u0627\u064b",
+    ]
+    assert subtitle.spans[-1].display_source.endswith("!")
+    assert all(len(span.gloss) <= MAX_EXPECTED_GLOSS_LENGTH for span in subtitle.spans)
+
+
+def test_alignment_does_not_reuse_one_target_for_multiple_words(
+    tmp_path: Path,
+) -> None:
+    class SimpleTranslator:
+        def translate_batch(self, texts: list[str]) -> list[str]:
+            return ["truth or not" for _ in texts]
+
+        def translate_words(self, words: list[str]) -> list[str]:
+            return ["or" for _ in words]
+
+    class DuplicateAligner:
+        def align(
+            self,
+            _source: list[str],
+            _target: list[str],
+        ) -> dict[int, tuple[int, ...]]:
+            return {0: (0,), 1: (0,), 2: (2,)}
+
+    class NoEntities:
+        def predict(self, words: list[str]) -> list[str]:
+            return ["O"] * len(words)
+
+    class NoopDiacritizer:
+        def diacritize(self, text: str) -> tuple[str, float]:
+            return text, 0.1
+
+    annotator = PedagogicalAnnotator(
+        config=make_config(tmp_path),
+        translator=SimpleTranslator(),
+        morphology=FakeMorphology(),
+        diacritizer=NoopDiacritizer(),
+        ner=NoEntities(),
+        aligner=DuplicateAligner(),
+    )
+    video = annotator.annotate(
+        [SubtitleSegment(0, 1, "\u0635\u062f\u0642 \u0623\u0648 \u0644\u0627")]
+    )
+
+    assert video.subtitles[0].alignments == {0: (0,), 2: (2,)}
+
+
+def test_uncorroborated_generic_entity_is_not_grouped(tmp_path: Path) -> None:
+    class GenericTranslator:
+        def translate_batch(self, texts: list[str]) -> list[str]:
+            return ["the elder_man" for _ in texts]
+
+        def translate_words(self, words: list[str]) -> list[str]:
+            return ["word" for _ in words]
+
+    class GenericNer:
+        def predict(self, _words: list[str]) -> list[str]:
+            return ["B-PER", "I-PER"]
+
+    class GenericAligner:
+        def align(
+            self,
+            _source: list[str],
+            _target: list[str],
+        ) -> dict[int, tuple[int, ...]]:
+            return {0: (0,), 1: (1,)}
+
+    class NoopDiacritizer:
+        def diacritize(self, text: str) -> tuple[str, float]:
+            return text, 0.1
+
+    annotator = PedagogicalAnnotator(
+        config=make_config(tmp_path),
+        translator=GenericTranslator(),
+        morphology=FakeMorphology(),
+        diacritizer=NoopDiacritizer(),
+        ner=GenericNer(),
+        aligner=GenericAligner(),
+    )
+    video = annotator.annotate(
+        [
+            SubtitleSegment(
+                0, 1, "\u0646\u0627\u0646\u0633\u064a \u0642\u0646\u0642\u0631"
+            )
+        ]
+    )
+
+    assert not video.entities
+    assert all(span.kind is SpanKind.TOKEN for span in video.subtitles[0].spans)
 
 
 def test_video_finishes_transcription_before_annotation(

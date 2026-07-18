@@ -25,6 +25,9 @@ class NaturalTranslator(Protocol):
     def translate_batch(self, texts: list[str]) -> list[str]:
         """Translate texts in order."""
 
+    def translate_words(self, words: list[str]) -> list[str]:
+        """Translate isolated lexical candidates with bounded decoding."""
+
 
 @dataclass(slots=True)
 class LocalMarianTranslator:
@@ -36,7 +39,12 @@ class LocalMarianTranslator:
     _tokenizer: Any = field(default=None, init=False, repr=False)
     _model: Any = field(default=None, init=False, repr=False)
     _torch_device: str = field(default="cpu", init=False, repr=False)
-    _cache: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _sentence_cache: dict[str, str] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _word_cache: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     def _load(self) -> None:
         if self._model is not None:
@@ -57,10 +65,34 @@ class LocalMarianTranslator:
         self._model.eval()
 
     def translate_batch(self, texts: list[str]) -> list[str]:
-        """Translate in batches, caching exact source strings."""
+        """Translate complete sentences, caching exact source strings."""
+        return self._translate(
+            texts,
+            cache=self._sentence_cache,
+            max_new_tokens=256,
+        )
+
+    def translate_words(self, words: list[str]) -> list[str]:
+        """Translate isolated words without allowing runaway generation."""
+        return self._translate(
+            words,
+            cache=self._word_cache,
+            max_new_tokens=16,
+            lexical=True,
+        )
+
+    def _translate(
+        self,
+        texts: list[str],
+        *,
+        cache: dict[str, str],
+        max_new_tokens: int,
+        lexical: bool = False,
+    ) -> list[str]:
+        """Run one bounded generation mode and update its dedicated cache."""
         if not texts:
             return []
-        missing = list(dict.fromkeys(text for text in texts if text not in self._cache))
+        missing = list(dict.fromkeys(text for text in texts if text not in cache))
         if missing:
             self._load()
             import torch
@@ -77,17 +109,23 @@ class LocalMarianTranslator:
                     max_length=512,
                 ).to(self._torch_device)
                 with torch.inference_mode():
-                    generated = self._model.generate(
-                        **encoded,
-                        max_new_tokens=256,
-                        num_beams=4,
-                    )
+                    generation_options: dict[str, Any] = {
+                        "max_new_tokens": max_new_tokens,
+                        "num_beams": 4,
+                    }
+                    if lexical:
+                        generation_options.update(
+                            no_repeat_ngram_size=2,
+                            repetition_penalty=1.2,
+                            early_stopping=True,
+                        )
+                    generated = self._model.generate(**encoded, **generation_options)
                 decoded = self._tokenizer.batch_decode(
                     generated,
                     skip_special_tokens=True,
                 )
-                self._cache.update(zip(batch, decoded, strict=True))
-        return [self._cache.get(text, text) or text for text in texts]
+                cache.update(zip(batch, decoded, strict=True))
+        return [cache.get(text, text) or text for text in texts]
 
     def release(self) -> None:
         """Release model memory before another large GPU stage starts."""
