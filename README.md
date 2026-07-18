@@ -9,10 +9,11 @@
 
 Dual Subtitles transforme des videos `.mp4` en sous-titres bilingues lisibles:
 
-- transcription `.srt` avec Whisper;
+- transcription arabe `.srt` avec Cohere Transcribe Arabic;
 - rendu `.ass` mot a mot, avec traduction litterale alignee;
 - diarisation optionnelle des locuteurs avec pyannote;
-- acceleration CUDA pour Whisper et pyannote.
+- decoupage par locuteur et pauses acoustiques avant transcription;
+- acceleration CUDA pour Cohere et pyannote.
 
 ## Google Colab
 
@@ -23,8 +24,9 @@ Google Drive pour lire les videos et conserver les sous-titres generes.
 
 ## Installation Locale
 
-Prerequis: Python 3.11+, `ffmpeg` et, pour la diarisation, un token Hugging Face
-autorise a utiliser `pyannote/speaker-diarization-3.1`.
+Prerequis: Python 3.11+, `ffmpeg` et un token Hugging Face autorise a utiliser
+`pyannote/speaker-diarization-community-1` ainsi que
+`CohereLabs/cohere-transcribe-arabic-07-2026`.
 
 ```bash
 pip install -r requirements.txt

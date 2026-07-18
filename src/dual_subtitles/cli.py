@@ -27,65 +27,19 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--transcription-language", default="ar")
     process.add_argument("--translation-source-language", default="ar")
     process.add_argument("--translation-target-language", default="en")
-    process.add_argument("--whisper-model", default="openai/whisper-large-v3")
     process.add_argument(
-        "--transcription-backend",
-        choices=("faster-whisper", "transformers"),
-        default="faster-whisper",
+        "--transcription-model",
+        default="CohereLabs/cohere-transcribe-arabic-07-2026",
     )
-    process.add_argument("--faster-whisper-compute-type")
     process.add_argument(
         "--diarization-model",
-        default="pyannote/speaker-diarization-3.1",
+        default="pyannote/speaker-diarization-community-1",
     )
     process.add_argument("--min-speech-duration", default=0.7, type=float)
     process.add_argument("--merge-gap", default=0.6, type=float)
     process.add_argument("--max-speech-duration", default=10.0, type=float)
-    process.add_argument("--subtitle-gap-threshold", default=0.25, type=float)
-    process.add_argument("--min-subtitle-duration", default=0.7, type=float)
-    process.add_argument("--max-subtitle-duration", default=5.0, type=float)
-    process.add_argument("--transcription-padding", default=0.3, type=float)
-    process.add_argument("--transcription-window-duration", default=28.0, type=float)
-    process.add_argument(
-        "--transcription-max-window-duration",
-        default=30.0,
-        type=float,
-    )
-    process.add_argument("--transcription-overlap", default=1.0, type=float)
-    process.add_argument("--transcription-num-beams", default=5, type=int)
-    process.add_argument("--transcription-retry-num-beams", default=8, type=int)
-    process.add_argument("--transcription-context-words", default=24, type=int)
-    process.add_argument(
-        "--transcription-context-reset-pause",
-        default=8.0,
-        type=float,
-    )
     process.add_argument("--silence-min-duration", default=0.4, type=float)
     process.add_argument("--silence-threshold-offset", default=16.0, type=float)
-    process.add_argument(
-        "--suspicious-confidence-threshold",
-        default=0.45,
-        type=float,
-    )
-    process.add_argument(
-        "--suspicious-log-probability-threshold",
-        default=-1.0,
-        type=float,
-    )
-    process.add_argument(
-        "--suspicious-compression-ratio-threshold",
-        default=2.4,
-        type=float,
-    )
-    process.add_argument(
-        "--suspicious-no-speech-threshold",
-        default=0.6,
-        type=float,
-    )
-    process.add_argument("--max-word-duration", default=3.0, type=float)
-    process.add_argument("--retry-context", default=8.0, type=float)
-    process.add_argument("--retry-min-improvement", default=0.12, type=float)
-    process.add_argument("--no-targeted-retry", action="store_true")
     process.add_argument("--max-words-per-subtitle", default=8, type=int)
     process.add_argument("--line-break-words", default=6, type=int)
     process.add_argument("--device")
@@ -125,38 +79,13 @@ def _process(args: argparse.Namespace, temp_dir: Path) -> int:
         transcription_language=args.transcription_language,
         translation_source_language=args.translation_source_language,
         translation_target_language=args.translation_target_language,
-        whisper_model=args.whisper_model,
-        transcription_backend=args.transcription_backend,
-        faster_whisper_compute_type=args.faster_whisper_compute_type,
+        transcription_model=args.transcription_model,
         diarization_model=args.diarization_model,
         min_speech_duration=args.min_speech_duration,
         merge_gap=args.merge_gap,
         max_speech_duration=args.max_speech_duration,
-        subtitle_gap_threshold=args.subtitle_gap_threshold,
-        min_subtitle_duration=args.min_subtitle_duration,
-        max_subtitle_duration=args.max_subtitle_duration,
-        transcription_padding=args.transcription_padding,
-        transcription_window_duration=args.transcription_window_duration,
-        transcription_max_window_duration=(args.transcription_max_window_duration),
-        transcription_overlap=args.transcription_overlap,
-        transcription_num_beams=args.transcription_num_beams,
-        transcription_retry_num_beams=args.transcription_retry_num_beams,
-        transcription_context_words=args.transcription_context_words,
-        transcription_context_reset_pause=(args.transcription_context_reset_pause),
         silence_min_duration=args.silence_min_duration,
         silence_threshold_offset=args.silence_threshold_offset,
-        suspicious_confidence_threshold=(args.suspicious_confidence_threshold),
-        suspicious_log_probability_threshold=(
-            args.suspicious_log_probability_threshold
-        ),
-        suspicious_compression_ratio_threshold=(
-            args.suspicious_compression_ratio_threshold
-        ),
-        suspicious_no_speech_threshold=args.suspicious_no_speech_threshold,
-        max_word_duration=args.max_word_duration,
-        retry_context=args.retry_context,
-        retry_min_improvement=args.retry_min_improvement,
-        enable_targeted_retry=not args.no_targeted_retry,
         max_words_per_subtitle=args.max_words_per_subtitle,
         line_break_words=args.line_break_words,
         generate_srt=not args.no_srt,

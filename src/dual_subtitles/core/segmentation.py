@@ -10,6 +10,141 @@ from dual_subtitles.models.subtitle import Segment, SubtitleSegment
 SENTENCE_ENDINGS = ("\u061f", "?", "!", ".", "\u060c", ",")
 
 
+def build_speaker_phrase_units(
+    turns: Iterable[Segment],
+    silence_boundaries: Iterable[float],
+    *,
+    min_duration: float,
+    max_duration: float,
+    merge_gap: float,
+) -> list[Segment]:
+    """Split speaker turns at acoustic pauses into ASR-sized phrase units."""
+    ordered = sorted(turns, key=lambda turn: (turn.start, turn.end))
+    coalesced: list[Segment] = []
+    for turn in ordered:
+        if turn.duration <= 0:
+            continue
+        if (
+            coalesced
+            and turn.speaker == coalesced[-1].speaker
+            and turn.start - coalesced[-1].end <= merge_gap
+        ):
+            previous = coalesced[-1]
+            coalesced[-1] = Segment(
+                start=previous.start,
+                end=max(previous.end, turn.end),
+                speaker=turn.speaker,
+            )
+        else:
+            coalesced.append(turn)
+
+    pauses = sorted(set(silence_boundaries))
+    units: list[Segment] = []
+    for turn in coalesced:
+        internal_pauses = [
+            pause
+            for pause in pauses
+            if turn.start + min_duration <= pause <= turn.end - min_duration
+        ]
+        boundaries = [turn.start, *internal_pauses, turn.end]
+        pieces = [
+            Segment(start=start, end=end, speaker=turn.speaker)
+            for start, end in zip(boundaries, boundaries[1:], strict=False)
+            if end > start
+        ]
+        pieces = _merge_short_phrase_units(pieces, min_duration=min_duration)
+        for piece in pieces:
+            units.extend(_split_phrase_unit(piece, max_duration=max_duration))
+    return units
+
+
+def split_phrase_subtitle(
+    subtitle: SubtitleSegment,
+    *,
+    max_words: int,
+) -> list[SubtitleSegment]:
+    """Split a long recognized turn without crossing its speaker boundary."""
+    words = subtitle.text.split()
+    if len(words) <= max_words:
+        return [subtitle]
+    groups: list[list[str]] = []
+    current: list[str] = []
+    for word in words:
+        current.append(word)
+        if len(current) >= max_words or word.endswith(SENTENCE_ENDINGS):
+            groups.append(current)
+            current = []
+    if current:
+        groups.append(current)
+    if len(groups) == 1:
+        return [subtitle]
+
+    total_weight = sum(len(group) for group in groups)
+    duration = subtitle.end - subtitle.start
+    cursor = subtitle.start
+    result: list[SubtitleSegment] = []
+    for index, group in enumerate(groups):
+        if index == len(groups) - 1:
+            end = subtitle.end
+        else:
+            end = cursor + duration * len(group) / total_weight
+        result.append(
+            SubtitleSegment(
+                start=cursor,
+                end=end,
+                text=" ".join(group),
+                speaker=subtitle.speaker,
+            )
+        )
+        cursor = end
+    return result
+
+
+def _merge_short_phrase_units(
+    units: list[Segment],
+    *,
+    min_duration: float,
+) -> list[Segment]:
+    """Keep short interjections by attaching only pause-created fragments."""
+    merged: list[Segment] = []
+    for unit in units:
+        if merged and unit.duration < min_duration:
+            previous = merged[-1]
+            merged[-1] = Segment(
+                start=previous.start,
+                end=unit.end,
+                speaker=unit.speaker,
+            )
+        else:
+            merged.append(unit)
+    if len(merged) > 1 and merged[0].duration < min_duration:
+        first = merged.pop(0)
+        next_unit = merged[0]
+        merged[0] = Segment(
+            start=first.start,
+            end=next_unit.end,
+            speaker=next_unit.speaker,
+        )
+    return merged
+
+
+def _split_phrase_unit(unit: Segment, *, max_duration: float) -> list[Segment]:
+    """Apply a hard safety limit only when no useful pause was detected."""
+    result: list[Segment] = []
+    start = unit.start
+    while unit.end - start > max_duration:
+        result.append(
+            Segment(
+                start=start,
+                end=start + max_duration,
+                speaker=unit.speaker,
+            )
+        )
+        start += max_duration
+    result.append(Segment(start=start, end=unit.end, speaker=unit.speaker))
+    return result
+
+
 def merge_speech_segments(
     segments: Iterable[Segment],
     *,

@@ -18,7 +18,7 @@ class MissingHuggingFaceTokenError(RuntimeError):
 class PyannoteDiarizer:
     """Thin wrapper around pyannote speaker diarization."""
 
-    model_name: str = "pyannote/speaker-diarization-3.1"
+    model_name: str = "pyannote/speaker-diarization-community-1"
     token_env_var: str = "HUGGINGFACE_TOKEN"
     device: int | str | None = None
     _pipeline: Any = field(init=False, repr=False, default=None)
@@ -29,8 +29,8 @@ class PyannoteDiarizer:
         if not token:
             msg = (
                 f"{self.token_env_var} is required when diarization is "
-                "enabled. Revoke any token committed in notebooks and set a "
-                "fresh token in the environment."
+                "enabled. Set HF_TOKEN and HUGGINGFACE_TOKEN before running "
+                "the pipeline."
             )
             raise MissingHuggingFaceTokenError(msg)
 
@@ -43,7 +43,7 @@ class PyannoteDiarizer:
 
         pipeline = Pipeline.from_pretrained(
             self.model_name,
-            use_auth_token=os.environ[self.token_env_var],
+            token=os.environ[self.token_env_var],
         )
         target_device = self._resolve_device(torch)
         if target_device.type == "cuda":
@@ -64,8 +64,16 @@ class PyannoteDiarizer:
     def detect(self, audio_path: Path) -> list[Segment]:
         """Detect speaker turns in an audio file."""
         result = self._load_pipeline()(str(audio_path))
+        annotation = getattr(result, "speaker_diarization", result)
         segments: list[Segment] = []
-        for turn, _, speaker in result.itertracks(yield_label=True):
+        if hasattr(annotation, "itertracks"):
+            tracks = (
+                (turn, speaker)
+                for turn, _, speaker in annotation.itertracks(yield_label=True)
+            )
+        else:
+            tracks = iter(annotation)
+        for turn, speaker in tracks:
             segments.append(
                 Segment(
                     start=float(turn.start),

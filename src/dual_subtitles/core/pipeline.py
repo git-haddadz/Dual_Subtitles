@@ -4,28 +4,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from dual_subtitles.core.config import ProcessingConfig
 from dual_subtitles.core.segmentation import (
     add_line_breaks,
-    clean_transcribed_segments,
-    deduplicate_overlap,
-    merge_speech_segments,
-    merge_subtitle_segments,
-    split_long_segments,
-)
-from dual_subtitles.core.transcript import (
-    assign_speakers,
-    build_audio_windows,
-    detect_suspicious_passages,
-    merge_window_transcripts,
-    repair_subtitle_timestamps,
-    repair_word_timestamps,
-    replace_passage_if_better,
-    words_to_subtitles,
+    build_speaker_phrase_units,
+    split_phrase_subtitle,
 )
 from dual_subtitles.io.audio import (
     detect_silence_boundaries,
@@ -34,17 +20,13 @@ from dual_subtitles.io.audio import (
     normalize_audio,
 )
 from dual_subtitles.io.subtitle_files import parse_srt, write_ass, write_srt
-from dual_subtitles.models.subtitle import Segment, SubtitleSegment, TranscribedWord
+from dual_subtitles.models.subtitle import Segment, SubtitleSegment
 from dual_subtitles.services.diarization import PyannoteDiarizer, SingleSpeakerDiarizer
-from dual_subtitles.services.transcription import (
-    SpeechTranscriber,
-    WhisperTranscriber,
-    create_transcriber,
-)
+from dual_subtitles.services.transcription import SpeechTranscriber, create_transcriber
 from dual_subtitles.services.translation import InterlinearGoogleTranslator
 
 LOGGER = logging.getLogger(__name__)
-MIN_TRANSCRIBABLE_DURATION = 0.3
+MIN_TRANSCRIBABLE_DURATION = 0.2
 VideoCompleteCallback = Callable[[Path, list[Path], Exception | None], None]
 
 
@@ -64,11 +46,10 @@ def process_directory(
     video_limit: int | None = None,
     on_video_complete: VideoCompleteCallback | None = None,
 ) -> list[Path]:
-    """Process all matching videos in a directory."""
+    """Process all matching videos while isolating failures per file."""
     if not config.input_dir.is_dir():
         msg = f"Input directory does not exist: {config.input_dir}"
         raise FileNotFoundError(msg)
-
     config.output_dir.mkdir(parents=True, exist_ok=True)
     config.temp_dir.mkdir(parents=True, exist_ok=True)
     videos = discover_videos(config.input_dir, config.normalized_extension())
@@ -88,7 +69,6 @@ def process_directory(
     transcriber: SpeechTranscriber | None = None
     diarizer: PyannoteDiarizer | None = None
     translator: InterlinearGoogleTranslator | None = None
-
     generated_files: list[Path] = []
     for index, video_path in enumerate(videos, start=1):
         LOGGER.info("[%s/%s] Processing %s", index, len(videos), video_path.name)
@@ -97,29 +77,20 @@ def process_directory(
         try:
             if _needs_transcription(video_path, config):
                 if transcriber is None:
-                    LOGGER.info(
-                        "Loading transcription backend %s (%s)",
-                        config.transcription_backend,
-                        config.whisper_model,
-                    )
                     transcriber = create_transcriber(
-                        config.transcription_backend,
-                        model_name=config.whisper_model,
+                        model_name=config.transcription_model,
                         device=config.device,
-                        compute_type=config.faster_whisper_compute_type,
                     )
                 if config.use_diarization and diarizer is None:
                     diarizer = PyannoteDiarizer(
                         config.diarization_model,
                         device=config.device,
                     )
-
             if _needs_translation(video_path, config) and translator is None:
                 translator = InterlinearGoogleTranslator(
                     source_language=config.translation_source_language,
                     target_language=config.translation_target_language,
                 )
-
             video_outputs = process_video(
                 video_path,
                 config=config,
@@ -136,6 +107,172 @@ def process_directory(
     return generated_files
 
 
+def process_video(  # noqa: PLR0912, PLR0915
+    video_path: Path,
+    *,
+    config: ProcessingConfig,
+    transcriber: SpeechTranscriber | None,
+    diarizer: PyannoteDiarizer | None,
+    translator: InterlinearGoogleTranslator | None,
+) -> list[Path]:
+    """Process one video with diarization before phrase-level recognition."""
+    srt_path, ass_path = _subtitle_paths(video_path, config.output_dir)
+    requested_paths = [
+        path
+        for enabled, path in (
+            (config.generate_srt, srt_path),
+            (config.generate_ass, ass_path),
+        )
+        if enabled
+    ]
+    if config.skip_existing:
+        existing = [path for path in requested_paths if _has_content(path)]
+        if len(existing) == len(requested_paths):
+            LOGGER.info("Skipping %s because requested outputs exist", video_path.name)
+            return existing
+        if (
+            config.generate_ass
+            and _has_content(srt_path)
+            and not _has_content(ass_path)
+        ):
+            if translator is None:
+                msg = "ASS generation requires a translator."
+                raise ValueError(msg)
+            write_ass(ass_path, parse_srt(srt_path), translator)
+            return [path for path in requested_paths if _has_content(path)]
+
+    if transcriber is None:
+        msg = "Transcription is required but no transcriber was provided."
+        raise ValueError(msg)
+    if config.generate_ass and translator is None:
+        msg = "ASS generation requires a translator."
+        raise ValueError(msg)
+
+    audio_path = config.temp_dir / f"{video_path.stem}.wav"
+    chunk_path = config.temp_dir / f"{video_path.stem}.phrase.wav"
+    try:
+        LOGGER.info("Step 1/7 - Extracting audio from %s", video_path.name)
+        extract_audio(video_path, audio_path)
+        LOGGER.info("Step 2/7 - Normalizing audio to mono 16 kHz")
+        normalize_audio(audio_path, audio_path)
+        audio = load_audio(audio_path)
+        duration_seconds = len(audio) / 1000
+
+        if config.use_diarization:
+            if diarizer is None:
+                msg = "Diarization is enabled but no diarizer was provided."
+                raise ValueError(msg)
+            LOGGER.info("Step 3/7 - Detecting speaker turns before transcription")
+            speaker_turns = diarizer.detect(audio_path)
+        else:
+            LOGGER.info("Step 3/7 - Using one speaker for the complete audio")
+            speaker_turns = SingleSpeakerDiarizer().detect_duration(duration_seconds)
+
+        LOGGER.info("Step 4/7 - Splitting speaker turns at acoustic pauses")
+        silence_boundaries = detect_silence_boundaries(
+            audio=audio,
+            min_silence_duration=config.silence_min_duration,
+            threshold_offset=config.silence_threshold_offset,
+        )
+        phrase_units = build_speaker_phrase_units(
+            speaker_turns,
+            silence_boundaries,
+            min_duration=config.min_speech_duration,
+            max_duration=config.max_speech_duration,
+            merge_gap=config.merge_gap,
+        )
+        LOGGER.info(
+            "Prepared %s speaker/phrase units from %s turns",
+            len(phrase_units),
+            len(speaker_turns),
+        )
+
+        LOGGER.info("Step 5/7 - Transcribing phrase units with Cohere Arabic")
+        recognized = transcribe_phrase_units(
+            phrase_units,
+            audio=audio,
+            language=config.transcription_language,
+            transcriber=transcriber,
+            temp_chunk=chunk_path,
+        )
+        subtitles = prepare_phrase_subtitles(recognized, config=config)
+        if not subtitles:
+            LOGGER.warning("Cohere returned no usable subtitle text")
+            return []
+        LOGGER.info("Step 6/7 - Prepared %s readable subtitles", len(subtitles))
+
+        LOGGER.info("Step 7/7 - Writing subtitle files")
+        generated: list[Path] = []
+        if config.generate_srt:
+            write_srt(srt_path, subtitles)
+            generated.append(srt_path)
+            LOGGER.info("SRT ready: %s", srt_path)
+        if config.generate_ass:
+            assert translator is not None
+            write_ass(ass_path, subtitles, translator)
+            generated.append(ass_path)
+            LOGGER.info("ASS ready: %s", ass_path)
+        return generated
+    finally:
+        audio_path.unlink(missing_ok=True)
+        chunk_path.unlink(missing_ok=True)
+
+
+def transcribe_phrase_units(
+    units: Iterable[Segment],
+    *,
+    audio: Any,
+    language: str,
+    transcriber: SpeechTranscriber,
+    temp_chunk: Path,
+) -> list[SubtitleSegment]:
+    """Transcribe each isolated unit without crossing a speaker boundary."""
+    unit_list = list(units)
+    recognized: list[SubtitleSegment] = []
+    for index, unit in enumerate(unit_list, start=1):
+        if unit.duration < MIN_TRANSCRIBABLE_DURATION:
+            continue
+        LOGGER.info(
+            "Transcription %s/%s (%s%%) - %.1fs to %.1fs - %s",
+            index,
+            len(unit_list),
+            round(index / len(unit_list) * 100),
+            unit.start,
+            unit.end,
+            unit.speaker,
+        )
+        start_ms = max(0, round(unit.start * 1000))
+        end_ms = min(len(audio), round(unit.end * 1000))
+        audio[start_ms:end_ms].export(temp_chunk, format="wav")
+        result = transcriber.transcribe_segment(
+            temp_chunk,
+            unit,
+            language=language,
+        )
+        if result is not None:
+            recognized.append(result)
+    return recognized
+
+
+def prepare_phrase_subtitles(
+    subtitles: Iterable[SubtitleSegment],
+    *,
+    config: ProcessingConfig,
+) -> list[SubtitleSegment]:
+    """Split long text while preserving every acoustic speaker boundary."""
+    split: list[SubtitleSegment] = []
+    for subtitle in subtitles:
+        if subtitle.end <= subtitle.start or not subtitle.text.strip():
+            continue
+        split.extend(
+            split_phrase_subtitle(
+                subtitle,
+                max_words=config.max_words_per_subtitle,
+            )
+        )
+    return add_line_breaks(split, line_break_words=config.line_break_words)
+
+
 def _subtitle_paths(video_path: Path, output_dir: Path) -> tuple[Path, Path]:
     output_base = output_dir / video_path.stem
     return output_base.with_suffix(".srt"), output_base.with_suffix(".ass")
@@ -148,7 +285,6 @@ def _has_content(path: Path) -> bool:
 def _needs_transcription(video_path: Path, config: ProcessingConfig) -> bool:
     if not config.skip_existing:
         return True
-
     srt_path, ass_path = _subtitle_paths(video_path, config.output_dir)
     if config.generate_srt and not _has_content(srt_path):
         return True
@@ -166,387 +302,3 @@ def _needs_translation(video_path: Path, config: ProcessingConfig) -> bool:
         return True
     _, ass_path = _subtitle_paths(video_path, config.output_dir)
     return not _has_content(ass_path)
-
-
-def process_video(  # noqa: PLR0912, PLR0915 - keep orchestration cleanup together.
-    video_path: Path,
-    *,
-    config: ProcessingConfig,
-    transcriber: SpeechTranscriber | None,
-    diarizer: PyannoteDiarizer | None,
-    translator: InterlinearGoogleTranslator | None,
-) -> list[Path]:
-    """Process one video and return generated subtitle paths."""
-    srt_path, ass_path = _subtitle_paths(video_path, config.output_dir)
-    requested_paths = [
-        path
-        for enabled, path in (
-            (config.generate_srt, srt_path),
-            (config.generate_ass, ass_path),
-        )
-        if enabled
-    ]
-    if config.skip_existing:
-        existing_outputs = [path for path in requested_paths if _has_content(path)]
-        if len(existing_outputs) == len(requested_paths):
-            LOGGER.info("Skipping %s because requested outputs exist", video_path.name)
-            return existing_outputs
-
-        can_reuse_srt = (
-            config.generate_ass
-            and not _has_content(ass_path)
-            and _has_content(srt_path)
-        )
-        if can_reuse_srt:
-            if translator is None:
-                msg = "ASS generation requires a translator."
-                raise ValueError(msg)
-            write_ass(ass_path, parse_srt(srt_path), translator)
-            return [path for path in requested_paths if _has_content(path)]
-
-    if transcriber is None:
-        msg = "Transcription is required but no transcriber was provided."
-        raise ValueError(msg)
-    if config.generate_ass and translator is None:
-        msg = "ASS generation requires a translator."
-        raise ValueError(msg)
-
-    audio_path = config.temp_dir / f"{video_path.stem}.wav"
-    chunk_path = config.temp_dir / f"{video_path.stem}.chunk.wav"
-    try:
-        LOGGER.info("Step 1/8 - Extracting audio from %s", video_path.name)
-        extract_audio(video_path, audio_path)
-        LOGGER.info("Step 2/8 - Normalizing audio to mono 16 kHz")
-        normalize_audio(audio_path, audio_path)
-        audio = load_audio(audio_path)
-
-        duration_seconds = len(audio) / 1000
-        LOGGER.info("Step 3/8 - Building continuous acoustic windows")
-        silence_boundaries = detect_silence_boundaries(
-            audio=audio,
-            min_silence_duration=config.silence_min_duration,
-            threshold_offset=config.silence_threshold_offset,
-        )
-        audio_windows = build_audio_windows(
-            duration_seconds,
-            silence_boundaries,
-            target_duration=config.transcription_window_duration,
-            max_duration=config.transcription_max_window_duration,
-            overlap=config.transcription_overlap,
-        )
-        LOGGER.info(
-            "Prepared %s continuous windows using %s silence boundaries",
-            len(audio_windows),
-            len(silence_boundaries),
-        )
-
-        LOGGER.info("Step 4/8 - Transcribing continuous audio before diarization")
-        words = transcribe_audio_windows(
-            audio_windows,
-            audio=audio,
-            config=config,
-            transcriber=transcriber,
-            temp_chunk=chunk_path,
-        )
-        if not words:
-            LOGGER.warning("Whisper returned no timestamped words")
-            return []
-
-        LOGGER.info("Step 5/8 - Checking suspicious transcript passages")
-        words = retry_suspicious_passages(
-            words,
-            audio=audio,
-            config=config,
-            transcriber=transcriber,
-            temp_chunk=chunk_path,
-        )
-        words = repair_word_timestamps(
-            words,
-            max_duration=config.max_word_duration,
-        )
-
-        if config.use_diarization:
-            if diarizer is None:
-                msg = "Diarization is enabled but no diarizer was provided."
-                raise ValueError(msg)
-            LOGGER.info("Step 6/8 - Detecting and assigning speakers")
-            speaker_turns = diarizer.detect(audio_path)
-        else:
-            LOGGER.info("Step 6/8 - Assigning a single speaker")
-            speaker_turns = SingleSpeakerDiarizer().detect_duration(duration_seconds)
-        words = assign_speakers(words, speaker_turns)
-
-        LOGGER.info("Step 7/8 - Reconstructing readable subtitles from words")
-        subtitles = prepare_word_subtitles(words, config=config)
-        LOGGER.info("Final subtitle segments: %s", len(subtitles))
-
-        LOGGER.info("Step 8/8 - Writing subtitle files")
-        generated_files: list[Path] = []
-        if config.generate_srt:
-            write_srt(srt_path, subtitles)
-            LOGGER.info("SRT ready: %s", srt_path)
-            generated_files.append(srt_path)
-        if config.generate_ass:
-            assert translator is not None
-            write_ass(ass_path, subtitles, translator)
-            LOGGER.info("ASS ready: %s", ass_path)
-            generated_files.append(ass_path)
-        return generated_files
-    finally:
-        audio_path.unlink(missing_ok=True)
-        chunk_path.unlink(missing_ok=True)
-
-
-def prepare_speech_segments(
-    segments: Iterable[Segment],
-    *,
-    config: ProcessingConfig,
-) -> list[Segment]:
-    """Apply filtering, merging, and splitting to speech segments."""
-    merged = merge_speech_segments(
-        segments,
-        min_duration=config.min_speech_duration,
-        merge_gap=config.merge_gap,
-    )
-    return split_long_segments(merged, max_duration=config.max_speech_duration)
-
-
-def prepare_subtitles(
-    segments: Iterable[SubtitleSegment],
-    *,
-    config: ProcessingConfig,
-) -> list[SubtitleSegment]:
-    """Clean and format transcribed subtitle segments."""
-    cleaned = clean_transcribed_segments(segments)
-    merged = merge_subtitle_segments(
-        cleaned,
-        gap_threshold=config.subtitle_gap_threshold,
-        max_duration=config.max_subtitle_duration,
-        max_words=config.max_words_per_subtitle,
-    )
-    return add_line_breaks(merged, line_break_words=config.line_break_words)
-
-
-def prepare_word_subtitles(
-    words: Iterable[TranscribedWord],
-    *,
-    config: ProcessingConfig,
-) -> list[SubtitleSegment]:
-    """Build final subtitle segments directly from Whisper word timestamps."""
-    subtitles = words_to_subtitles(
-        words,
-        gap_threshold=config.subtitle_gap_threshold,
-        max_duration=config.max_subtitle_duration,
-        max_words=config.max_words_per_subtitle,
-    )
-    cleaned = clean_transcribed_segments(subtitles)
-    repaired = repair_subtitle_timestamps(
-        cleaned,
-        min_duration=config.min_subtitle_duration,
-        max_duration=config.max_subtitle_duration,
-        max_words=config.max_words_per_subtitle,
-        merge_gap=config.subtitle_gap_threshold,
-    )
-    return add_line_breaks(repaired, line_break_words=config.line_break_words)
-
-
-def transcribe_audio_windows(
-    windows: Iterable[Segment],
-    *,
-    audio: Any,
-    config: ProcessingConfig,
-    transcriber: SpeechTranscriber,
-    temp_chunk: Path | None = None,
-) -> list[TranscribedWord]:
-    """Transcribe overlapping continuous windows independently of speakers."""
-    window_transcripts: list[list[TranscribedWord]] = []
-    previous_words: list[TranscribedWord] = []
-    window_list = list(windows)
-    temp_chunk = temp_chunk or config.temp_dir / "continuous-window.wav"
-    for index, window in enumerate(window_list, start=1):
-        progress = round(index / len(window_list) * 100)
-        LOGGER.info(
-            "Transcription %s/%s (%s%%) - %.1fs to %.1fs",
-            index,
-            len(window_list),
-            progress,
-            window.start,
-            window.end,
-        )
-        start_ms = max(0, round(window.start * 1000))
-        end_ms = min(len(audio), round(window.end * 1000))
-        audio[start_ms:end_ms].export(temp_chunk, format="wav")
-        prompt = _build_transcription_prompt(
-            previous_words,
-            window_start=window.start,
-            max_words=config.transcription_context_words,
-            reset_pause=config.transcription_context_reset_pause,
-        )
-        window_words = transcriber.transcribe_window(
-            temp_chunk,
-            language=config.transcription_language,
-            offset=start_ms / 1000,
-            num_beams=config.transcription_num_beams,
-            prompt=prompt,
-        )
-        window_words = [replace(word, window_index=index - 1) for word in window_words]
-        window_transcripts.append(window_words)
-        previous_words.extend(window_words)
-    all_word_count = sum(len(items) for items in window_transcripts)
-    merged = merge_window_transcripts(window_transcripts)
-    LOGGER.info(
-        "Whisper emitted %s words; %s remain after overlap fusion",
-        all_word_count,
-        len(merged),
-    )
-    return merged
-
-
-def retry_suspicious_passages(
-    words: Iterable[TranscribedWord],
-    *,
-    audio: Any,
-    config: ProcessingConfig,
-    transcriber: SpeechTranscriber,
-    temp_chunk: Path | None = None,
-) -> list[TranscribedWord]:
-    """Retry suspect intervals with more context and conservative selection."""
-    selected = list(words)
-    if not config.enable_targeted_retry:
-        return selected
-    passages = detect_suspicious_passages(
-        selected,
-        confidence_threshold=config.suspicious_confidence_threshold,
-        log_probability_threshold=(config.suspicious_log_probability_threshold),
-        compression_ratio_threshold=(config.suspicious_compression_ratio_threshold),
-        no_speech_threshold=config.suspicious_no_speech_threshold,
-        max_word_duration=config.max_word_duration,
-    )
-    LOGGER.info("Detected %s suspicious passages", len(passages))
-    if not passages:
-        return selected
-
-    temp_chunk = temp_chunk or config.temp_dir / "retry-window.wav"
-    duration_seconds = len(audio) / 1000
-    for index, passage in enumerate(passages, start=1):
-        context_start = max(0.0, passage.start - config.retry_context)
-        context_end = min(
-            duration_seconds,
-            passage.end + config.retry_context,
-        )
-        LOGGER.info(
-            "Retry %s/%s - %.1fs to %.1fs (%s)",
-            index,
-            len(passages),
-            context_start,
-            context_end,
-            ", ".join(passage.reasons),
-        )
-        start_ms = round(context_start * 1000)
-        end_ms = round(context_end * 1000)
-        audio[start_ms:end_ms].export(temp_chunk, format="wav")
-        prompt = _build_transcription_prompt(
-            selected,
-            window_start=context_start,
-            max_words=config.transcription_context_words,
-            reset_pause=config.transcription_context_reset_pause,
-        )
-        retry_words = transcriber.transcribe_window(
-            temp_chunk,
-            language=config.transcription_language,
-            offset=context_start,
-            num_beams=config.transcription_retry_num_beams,
-            prompt=prompt,
-            is_retry=True,
-        )
-        selected, replaced = replace_passage_if_better(
-            selected,
-            retry_words,
-            passage,
-            min_improvement=config.retry_min_improvement,
-        )
-        if replaced:
-            LOGGER.info("Accepted retry %s/%s", index, len(passages))
-        else:
-            LOGGER.info(
-                "Kept original transcript for retry %s/%s",
-                index,
-                len(passages),
-            )
-    return selected
-
-
-def _build_transcription_prompt(
-    words: Iterable[TranscribedWord],
-    *,
-    window_start: float,
-    max_words: int,
-    reset_pause: float,
-) -> str | None:
-    """Build a short cross-window prompt unless a long pause resets context."""
-    previous = sorted(
-        (word for word in words if word.end <= window_start + 0.1),
-        key=lambda word: (word.start, word.end),
-    )
-    if not previous or window_start - previous[-1].end > reset_pause:
-        return None
-    prompt_words = [word.text.strip() for word in previous[-max_words:]]
-    prompt = " ".join(word for word in prompt_words if word)
-    return prompt or None
-
-
-def transcribe_segments(
-    segments: Iterable[Segment],
-    *,
-    audio: Any,
-    config: ProcessingConfig,
-    transcriber: WhisperTranscriber,
-    temp_chunk: Path | None = None,
-) -> list[SubtitleSegment]:
-    """Transcribe prepared speech segments."""
-    transcribed: list[SubtitleSegment] = []
-    segment_list = list(segments)
-    total_segments = len(segment_list)
-    temp_chunk = temp_chunk or config.temp_dir / "chunk.wav"
-    for index, segment in enumerate(segment_list, start=1):
-        if segment.duration < MIN_TRANSCRIBABLE_DURATION:
-            LOGGER.info(
-                "Transcription %s/%s - skipped short segment",
-                index,
-                total_segments,
-            )
-            continue
-
-        progress = round(index / total_segments * 100)
-        LOGGER.info(
-            "Transcription %s/%s (%s%%) - %.1fs to %.1fs - %s",
-            index,
-            total_segments,
-            progress,
-            segment.start,
-            segment.end,
-            segment.speaker,
-        )
-
-        start_ms = max(0, int((segment.start - config.transcription_padding) * 1000))
-        end_ms = int((segment.end + config.transcription_padding) * 1000)
-        chunk = audio[start_ms:end_ms]
-        chunk.export(temp_chunk, format="wav")
-        offset = start_ms / 1000
-        new_segments = transcriber.transcribe_segment(
-            temp_chunk,
-            segment,
-            language=config.transcription_language,
-            offset=offset,
-        )
-        if transcribed and new_segments:
-            deduplicated = deduplicate_overlap(
-                transcribed[-1].text,
-                new_segments[0].text,
-            )
-            if deduplicated:
-                new_segments[0] = replace(new_segments[0], text=deduplicated)
-            else:
-                new_segments = new_segments[1:]
-        transcribed.extend(new_segments)
-    return transcribed
