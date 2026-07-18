@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import ctypes
+import importlib.util
 import logging
+import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -60,9 +64,12 @@ class FasterWhisperTranscriber:
 
     def __post_init__(self) -> None:
         """Load the converted Whisper model on the selected device."""
+        target_device, device_index = _resolve_faster_whisper_device(self.device)
+        if target_device == "cuda":
+            _preload_nvidia_libraries()
+
         from faster_whisper import WhisperModel
 
-        target_device, device_index = _resolve_faster_whisper_device(self.device)
         compute_type = self.compute_type
         if compute_type is None:
             compute_type = "float16" if target_device == "cuda" else "int8"
@@ -485,6 +492,76 @@ def _resolve_faster_whisper_device(
         return "cuda", int(raw_index) if raw_index else 0
     msg = f"Unsupported faster-whisper device: {device}"
     raise ValueError(msg)
+
+
+def _preload_nvidia_libraries() -> None:
+    """Preload pip-provided CUDA libraries before CTranslate2 inference."""
+    if sys.platform != "linux":
+        return
+
+    library_directories = _nvidia_library_directories()
+    if not library_directories:
+        LOGGER.warning(
+            "No pip-provided NVIDIA library directory found; using the "
+            "system CUDA runtime"
+        )
+        return
+
+    existing_path = os.environ.get("LD_LIBRARY_PATH", "")
+    directory_path = os.pathsep.join(str(path) for path in library_directories)
+    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
+        part for part in (directory_path, existing_path) if part
+    )
+
+    library_names = (
+        "libcublasLt.so.12",
+        "libcublas.so.12",
+        "libcudnn.so.8",
+        "libcudnn_ops_infer.so.8",
+        "libcudnn_cnn_infer.so.8",
+        "libcudnn_adv_infer.so.8",
+    )
+    loaded: list[str] = []
+    for library_name in library_names:
+        library_path = next(
+            (
+                directory / library_name
+                for directory in library_directories
+                if (directory / library_name).is_file()
+            ),
+            None,
+        )
+        if library_path is None:
+            continue
+        ctypes.CDLL(str(library_path), mode=ctypes.RTLD_GLOBAL)
+        loaded.append(library_name)
+
+    LOGGER.info(
+        "Preloaded %s CUDA libraries for CTranslate2: %s",
+        len(loaded),
+        ", ".join(loaded) if loaded else "none",
+    )
+
+
+def _nvidia_library_directories() -> list[Path]:
+    directories: list[Path] = []
+    for package_name in ("nvidia.cublas.lib", "nvidia.cudnn.lib"):
+        try:
+            spec = importlib.util.find_spec(package_name)
+        except ModuleNotFoundError:
+            continue
+        if spec is None:
+            continue
+        if spec.submodule_search_locations:
+            candidates = [Path(path) for path in spec.submodule_search_locations]
+        elif spec.origin:
+            candidates = [Path(spec.origin).parent]
+        else:
+            continue
+        for candidate in candidates:
+            if candidate not in directories:
+                directories.append(candidate)
+    return directories
 
 
 def _faster_whisper_model_name(model_name: str) -> str:
