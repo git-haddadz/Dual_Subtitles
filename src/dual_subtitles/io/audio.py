@@ -3,20 +3,40 @@
 from __future__ import annotations
 
 import math
+import subprocess
 from pathlib import Path
 from typing import Any
 
 
 def extract_audio(video_path: Path, output_path: Path) -> Path:
-    """Extract a video's audio track into a WAV file."""
-    from moviepy.editor import VideoFileClip
-
+    """Extract a video's audio track with ffmpeg without importing MoviePy."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with VideoFileClip(str(video_path)) as video:
-        if video.audio is None:
-            msg = f"No audio track found in {video_path}"
-            raise ValueError(msg)
-        video.audio.write_audiofile(str(output_path), verbose=False, logger=None)
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(video_path),
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-acodec",
+        "pcm_s16le",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        details = exc.stderr.strip() if exc.stderr else "unknown ffmpeg error"
+        msg = f"Could not extract audio from {video_path}: {details}"
+        raise RuntimeError(msg) from exc
     return output_path
 
 

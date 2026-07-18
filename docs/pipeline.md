@@ -74,7 +74,7 @@ Chaque erreur est journalisee sans interrompre les videos suivantes.
 
 `src/dual_subtitles/io/audio.py` assure:
 
-- l'extraction de la piste audio avec MoviePy et ffmpeg;
+- l'extraction directe de la premiere piste audio avec ffmpeg;
 - la conversion en WAV;
 - la normalisation en mono 16 kHz avec pydub;
 - le chargement de l'audio pour le decoupage des chunks.
