@@ -1,4 +1,4 @@
-"""Google-backed lexical translation helpers."""
+"""Translation helpers for ASS interlinear subtitles."""
 
 from __future__ import annotations
 
@@ -13,22 +13,15 @@ LOGGER = logging.getLogger(__name__)
 
 
 class TranslatorClient(Protocol):
-    """Small compatibility protocol implemented by translation clients."""
+    """Small protocol implemented by translation clients."""
 
     def translate(self, text: str) -> str:
         """Translate text and return the translated string."""
 
 
-class LexicalTranslator(Protocol):
-    """Protocol for the translator that supplies displayed word glosses."""
-
-    def translate_words(self, words: list[str]) -> list[str]:
-        """Translate isolated words in order."""
-
-
 @dataclass(slots=True)
 class InterlinearGoogleTranslator:
-    """Google-backed word translator retained from the original pipeline."""
+    """Build word-by-word interlinear ASS text using deep-translator."""
 
     source_language: str = "ar"
     target_language: str = "en"
@@ -36,9 +29,10 @@ class InterlinearGoogleTranslator:
     client: TranslatorClient | None = None
 
     def __post_init__(self) -> None:
-        """Create the account-free Google web translator lazily."""
+        """Create the Google translator lazily unless a client is injected."""
         if self.client is not None:
             return
+
         from deep_translator import GoogleTranslator
 
         self.client = GoogleTranslator(
@@ -46,22 +40,19 @@ class InterlinearGoogleTranslator:
             target=self.target_language,
         )
 
-    def translate_words(self, words: list[str]) -> list[str]:
-        """Translate words independently with the same cache as the old path."""
-        return [self._translate_word(word) for word in words]
-
     def interlinear(self, text: str) -> str:
-        """Return the former two-line compatibility representation."""
+        """Return source text above literal translations in visual RTL order."""
         pairs = self.word_pairs(text)
         source = " ".join(pair.source for pair in pairs)
         translations = " ".join(pair.translation for pair in reversed(pairs))
         return source + r"\N" + translations
 
     def word_pairs(self, text: str) -> list[WordPair]:
-        """Translate words through an explicitly injected legacy client."""
+        """Translate every source word independently and preserve pairing."""
+        source_words = text.split()
         return [
             WordPair(source=word, translation=self._translate_word(word))
-            for word in text.split()
+            for word in source_words
         ]
 
     def _translate_word(self, word: str) -> str:
@@ -71,18 +62,13 @@ class InterlinearGoogleTranslator:
 
     def _safe_translate(self, text: str) -> str:
         if self.client is None:
-            LOGGER.warning("No legacy translation client configured for %r", text)
             return ""
+
         try:
             return self.client.translate(text)
-        except Exception as exc:  # noqa: BLE001 - compatibility clients vary.
-            LOGGER.warning("Legacy translation failed for %r: %s", text, exc)
+        except Exception as exc:  # noqa: BLE001 - third-party clients vary.
+            LOGGER.warning("Translation failed for %r: %s", text, exc)
             return ""
 
 
-__all__ = [
-    "InterlinearGoogleTranslator",
-    "LexicalTranslator",
-    "TranslatorClient",
-    "deduplicate_overlap",
-]
+__all__ = ["InterlinearGoogleTranslator", "TranslatorClient", "deduplicate_overlap"]

@@ -3,17 +3,11 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import unicodedata
 from collections.abc import Iterable
-from dataclasses import dataclass
 from pathlib import Path
 
-from dual_subtitles.core.config import ProcessingConfig
 from dual_subtitles.models.subtitle import (
-    AnnotatedSpan,
-    AnnotatedSubtitle,
-    AnnotatedVideo,
     InterlinearTranslator,
     SubtitleSegment,
     WordPair,
@@ -31,14 +25,11 @@ ASS_HORIZONTAL_MARGIN = 60
 ASS_BOTTOM_MARGIN = 35
 ASS_COLUMN_GAP = 18
 ASS_COLUMN_PADDING = 14
-ASS_ROW_HEIGHT = 118
-ASS_PAIR_VERTICAL_GAP = 68
-ASS_ARABIC_FONT_SIZE = 64
-ASS_ENGLISH_FONT_SIZE = 28
+ASS_ROW_HEIGHT = 90
+ASS_PAIR_VERTICAL_GAP = 50
+ASS_ARABIC_FONT_SIZE = 48
+ASS_ENGLISH_FONT_SIZE = 30
 LOGGER = logging.getLogger(__name__)
-FONT_DIR = Path(__file__).resolve().parents[1] / "assets" / "fonts"
-SOURCE_FONT_FILE = FONT_DIR / "NotoNaskhArabic-Regular.ttf"
-TARGET_FONT_FILE = FONT_DIR / "NotoSans-Regular.ttf"
 
 
 def _normalize_ass_text(text: str) -> str:
@@ -49,19 +40,7 @@ def _normalize_ass_text(text: str) -> str:
 
 
 def _estimated_text_width(text: str, font_size: int) -> float:
-    """Measure rendered width, with a deterministic fallback for missing fonts."""
-    font_path = SOURCE_FONT_FILE if _contains_rtl(text) else TARGET_FONT_FILE
-    try:
-        from PIL import ImageFont
-
-        font = ImageFont.truetype(str(font_path), font_size)
-        return float(font.getlength(text))
-    except (ImportError, OSError):
-        return _fallback_text_width(text, font_size)
-
-
-def _fallback_text_width(text: str, font_size: int) -> float:
-    """Estimate width only when Pillow or the packaged font is unavailable."""
+    """Estimate rendered width without depending on a platform font engine."""
     width_units = 0.0
     for character in text:
         if character.isspace():
@@ -75,12 +54,6 @@ def _fallback_text_width(text: str, font_size: int) -> float:
         else:
             width_units += 0.54
     return width_units * font_size
-
-
-def _contains_rtl(text: str) -> bool:
-    return any(
-        unicodedata.bidirectional(character) in {"AL", "R"} for character in text
-    )
 
 
 def _pair_column_width(pair: WordPair) -> float:
@@ -239,211 +212,6 @@ def build_ass(
         events.extend(_build_word_pair_events(segment, pairs))
 
     return header + "\n".join(events) + ("\n" if events else "")
-
-
-@dataclass(frozen=True, slots=True)
-class AssLayout:
-    """Rendering values for a pedagogical ASS canvas."""
-
-    source_font_name: str = "Noto Naskh Arabic"
-    target_font_name: str = "Noto Sans"
-    source_font_size: int = ASS_ARABIC_FONT_SIZE
-    target_font_size: int = ASS_ENGLISH_FONT_SIZE
-    vertical_gap: int = ASS_PAIR_VERTICAL_GAP
-
-
-def _annotated_ass_header(layout: AssLayout) -> str:
-    """Build ASS styles whose source line remains visually dominant."""
-    return (
-        "[Script Info]\n"
-        "ScriptType: v4.00+\n"
-        f"PlayResX: {ASS_PLAY_RES_X}\n"
-        f"PlayResY: {ASS_PLAY_RES_Y}\n"
-        "WrapStyle: 2\n"
-        "ScaledBorderAndShadow: yes\n\n"
-        "[V4+ Styles]\n"
-        "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,"
-        "OutlineColour,BackColour,Bold,Italic,Underline,Strikeout,ScaleX,"
-        "ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,"
-        "MarginR,MarginV,Encoding\n"
-        f"Style: SourceWord,{layout.source_font_name},{layout.source_font_size},"
-        "&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,"
-        "0,0,1,3,1,5,0,0,0,1\n"
-        f"Style: TargetGloss,{layout.target_font_name},{layout.target_font_size},"
-        "&H00D9FFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,"
-        "0,0,1,2,1,5,0,0,0,1\n\n"
-        "[Events]\n"
-        "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,"
-        "Effect,Text\n"
-    )
-
-
-def _font_measure(text: str, font_path: Path, font_size: int) -> tuple[float, float]:
-    """Return exact font width and line height where Pillow can load the font."""
-    try:
-        from PIL import ImageFont
-
-        font = ImageFont.truetype(str(font_path), font_size)
-        left, top, right, bottom = font.getbbox(text or "Ag")
-        return float(right - left), float(bottom - top)
-    except (ImportError, OSError):
-        return _fallback_text_width(text, font_size), float(font_size * 1.25)
-
-
-def _wrap_gloss(gloss: str, maximum_width: float, font_size: int) -> str:
-    """Wrap a long target gloss to at most two ASS lines."""
-    width, _ = _font_measure(gloss, TARGET_FONT_FILE, font_size)
-    if width <= maximum_width or " " not in gloss:
-        return gloss
-    words = gloss.split()
-    best_index = 1
-    best_difference = float("inf")
-    for index in range(1, len(words)):
-        left = " ".join(words[:index])
-        right = " ".join(words[index:])
-        left_width, _ = _font_measure(left, TARGET_FONT_FILE, font_size)
-        right_width, _ = _font_measure(right, TARGET_FONT_FILE, font_size)
-        difference = abs(left_width - right_width)
-        if (
-            max(left_width, right_width) <= maximum_width
-            and difference < best_difference
-        ):
-            best_index = index
-            best_difference = difference
-    return " ".join(words[:best_index]) + r"\N" + " ".join(words[best_index:])
-
-
-def _span_column(span: AnnotatedSpan, layout: AssLayout) -> tuple[str, float, float]:
-    """Return wrapped gloss, column width and target line height."""
-    safe_width = ASS_PLAY_RES_X - ASS_HORIZONTAL_MARGIN * 2
-    source_width, _ = _font_measure(
-        span.display_source,
-        SOURCE_FONT_FILE,
-        layout.source_font_size,
-    )
-    gloss = _wrap_gloss(span.gloss, safe_width, layout.target_font_size)
-    gloss_lines = gloss.split(r"\N")
-    measurements = [
-        _font_measure(line, TARGET_FONT_FILE, layout.target_font_size)
-        for line in gloss_lines
-    ]
-    target_width = max((width for width, _ in measurements), default=0.0)
-    target_height = sum(height for _, height in measurements)
-    if len(measurements) > 1:
-        target_height += layout.target_font_size * 0.2
-    width = min(
-        safe_width,
-        max(source_width, target_width) + ASS_COLUMN_PADDING * 2,
-    )
-    return gloss, width, target_height
-
-
-def _annotated_rows(
-    spans: list[AnnotatedSpan],
-    layout: AssLayout,
-) -> list[list[tuple[AnnotatedSpan, str, float, float]]]:
-    """Pack complete source/gloss pairs into right-to-left rows."""
-    maximum_width = ASS_PLAY_RES_X - ASS_HORIZONTAL_MARGIN * 2
-    rows: list[list[tuple[AnnotatedSpan, str, float, float]]] = []
-    row: list[tuple[AnnotatedSpan, str, float, float]] = []
-    row_width = 0.0
-    for span in spans:
-        gloss, width, target_height = _span_column(span, layout)
-        required = width + (ASS_COLUMN_GAP if row else 0)
-        if row and row_width + required > maximum_width:
-            rows.append(row)
-            row = []
-            row_width = 0.0
-            required = width
-        row.append((span, gloss, width, target_height))
-        row_width += required
-    if row:
-        rows.append(row)
-    return rows
-
-
-def _annotated_events(
-    subtitle: AnnotatedSubtitle,
-    layout: AssLayout,
-) -> list[str]:
-    """Position each annotated span and its gloss on a shared x coordinate."""
-    rows = _annotated_rows(subtitle.spans, layout)
-    start = format_ass_timestamp(subtitle.segment.start)
-    end = format_ass_timestamp(subtitle.segment.end)
-    bottom_y = ASS_PLAY_RES_Y - ASS_BOTTOM_MARGIN - layout.target_font_size // 2
-    row_heights = []
-    for row in rows:
-        target_height = max((item[3] for item in row), default=layout.target_font_size)
-        row_heights.append(
-            layout.vertical_gap + target_height + layout.source_font_size
-        )
-    events: list[str] = []
-    consumed_height = 0.0
-    for row_index in range(len(rows) - 1, -1, -1):
-        row = rows[row_index]
-        target_height = max((item[3] for item in row), default=layout.target_font_size)
-        target_y = round(bottom_y - consumed_height - target_height / 2)
-        source_y = round(target_y - target_height / 2 - layout.vertical_gap)
-        cursor_x = float(ASS_PLAY_RES_X - ASS_HORIZONTAL_MARGIN)
-        for span, gloss, width, _ in row:
-            center_x = round(cursor_x - width / 2)
-            source_tag = rf"{{\an5\pos({center_x},{source_y})}}"
-            target_tag = rf"{{\an5\pos({center_x},{target_y})}}"
-            events.append(
-                f"Dialogue: 0,{start},{end},SourceWord,,0,0,0,,"
-                f"{source_tag}{_normalize_ass_text(span.display_source)}"
-            )
-            normalized_gloss = _normalize_ass_text(gloss).replace(r"\\N", r"\N")
-            events.append(
-                f"Dialogue: 1,{start},{end},TargetGloss,,0,0,0,,"
-                f"{target_tag}{normalized_gloss}"
-            )
-            cursor_x -= width + ASS_COLUMN_GAP
-        consumed_height += row_heights[row_index]
-    return events
-
-
-def build_annotated_ass(
-    video: AnnotatedVideo,
-    config: ProcessingConfig | None = None,
-) -> str:
-    """Build ASS from validated pedagogical spans without translating."""
-    layout = AssLayout(
-        source_font_name=(config.source_font_name if config else "Noto Naskh Arabic"),
-        target_font_name=(config.target_font_name if config else "Noto Sans"),
-        source_font_size=(config.source_font_size if config else ASS_ARABIC_FONT_SIZE),
-        target_font_size=(config.target_font_size if config else ASS_ENGLISH_FONT_SIZE),
-        vertical_gap=(config.pair_vertical_gap if config else ASS_PAIR_VERTICAL_GAP),
-    )
-    events: list[str] = []
-    for index, subtitle in enumerate(video.subtitles, start=1):
-        if not subtitle.spans:
-            continue
-        LOGGER.info("ASS rendering %s/%s", index, len(video.subtitles))
-        events.extend(_annotated_events(subtitle, layout))
-    header = _annotated_ass_header(layout)
-    return header + "\n".join(events) + ("\n" if events else "")
-
-
-def write_annotated_ass(
-    path: Path,
-    video: AnnotatedVideo,
-    config: ProcessingConfig | None = None,
-) -> None:
-    """Write a validated annotated video to an ASS file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(build_annotated_ass(video, config), encoding="utf-8")
-
-
-def provide_render_fonts(output_dir: Path) -> Path:
-    """Copy the exact measured fonts beside generated subtitle outputs."""
-    destination = output_dir / "fonts"
-    destination.mkdir(parents=True, exist_ok=True)
-    for source in (SOURCE_FONT_FILE, TARGET_FONT_FILE, FONT_DIR / "README.txt"):
-        target = destination / source.name
-        if source.is_file() and not target.is_file():
-            shutil.copy2(source, target)
-    return destination
 
 
 def write_ass(

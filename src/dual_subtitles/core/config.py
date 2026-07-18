@@ -16,20 +16,6 @@ class ProcessingConfig:
     transcription_language: str = "ar"
     translation_source_language: str = "ar"
     translation_target_language: str = "en"
-    morphology_model: str = "auto"
-    ner_model: str = "camel_tools"
-    diacritization_model: str = "TigreGotico/catt-diacritizer"
-    context_before: int = 2
-    context_after: int = 2
-    context_max_tokens: int = 256
-    context_max_gap: float = 8.0
-    diacritization_min_confidence: float = 0.78
-    gloss_min_confidence: float = 0.45
-    source_font_name: str = "Noto Naskh Arabic"
-    target_font_name: str = "Noto Sans"
-    source_font_size: int = 64
-    target_font_size: int = 28
-    pair_vertical_gap: int = 68
     whisper_model: str = "openai/whisper-large-v3"
     diarization_model: str = "pyannote/speaker-diarization-3.1"
     min_speech_duration: float = 0.7
@@ -59,10 +45,6 @@ class ProcessingConfig:
             "max_subtitle_duration": self.max_subtitle_duration,
             "max_words_per_subtitle": self.max_words_per_subtitle,
             "line_break_words": self.line_break_words,
-            "context_max_tokens": self.context_max_tokens,
-            "source_font_size": self.source_font_size,
-            "target_font_size": self.target_font_size,
-            "pair_vertical_gap": self.pair_vertical_gap,
         }
         for name, value in positive_values.items():
             if value <= 0:
@@ -73,22 +55,10 @@ class ProcessingConfig:
             "merge_gap": self.merge_gap,
             "subtitle_gap_threshold": self.subtitle_gap_threshold,
             "transcription_padding": self.transcription_padding,
-            "context_before": self.context_before,
-            "context_after": self.context_after,
-            "context_max_gap": self.context_max_gap,
         }
         for name, value in non_negative_values.items():
             if value < 0:
                 msg = f"{name} must be zero or greater."
-                raise ValueError(msg)
-
-        confidence_values = {
-            "diacritization_min_confidence": self.diacritization_min_confidence,
-            "gloss_min_confidence": self.gloss_min_confidence,
-        }
-        for name, value in confidence_values.items():
-            if not 0 <= value <= 1:
-                msg = f"{name} must be between zero and one."
                 raise ValueError(msg)
 
         if not self.normalized_extension().strip("."):

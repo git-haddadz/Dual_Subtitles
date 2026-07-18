@@ -18,22 +18,15 @@ from dual_subtitles.core.segmentation import (
     split_long_segments,
 )
 from dual_subtitles.io.audio import extract_audio, load_audio, normalize_audio
-from dual_subtitles.io.subtitle_files import (
-    parse_srt,
-    provide_render_fonts,
-    write_annotated_ass,
-    write_srt,
-)
+from dual_subtitles.io.subtitle_files import parse_srt, write_ass, write_srt
 from dual_subtitles.models.subtitle import Segment, SubtitleSegment
 from dual_subtitles.services.diarization import PyannoteDiarizer, SingleSpeakerDiarizer
-from dual_subtitles.services.linguistics import PedagogicalAnnotator
 from dual_subtitles.services.transcription import WhisperTranscriber
 from dual_subtitles.services.translation import InterlinearGoogleTranslator
 
 LOGGER = logging.getLogger(__name__)
 MIN_TRANSCRIBABLE_DURATION = 0.3
 VideoCompleteCallback = Callable[[Path, list[Path], Exception | None], None]
-VideoProgressCallback = Callable[[Path, str, int, int], None]
 
 
 def discover_videos(input_dir: Path, extension: str) -> list[Path]:
@@ -46,12 +39,11 @@ def discover_videos(input_dir: Path, extension: str) -> list[Path]:
     )
 
 
-def process_directory(  # noqa: PLR0912, PLR0915 - lazy service orchestration.
+def process_directory(
     config: ProcessingConfig,
     *,
     video_limit: int | None = None,
     on_video_complete: VideoCompleteCallback | None = None,
-    on_progress: VideoProgressCallback | None = None,
 ) -> list[Path]:
     """Process all matching videos in a directory."""
     if not config.input_dir.is_dir():
@@ -60,8 +52,6 @@ def process_directory(  # noqa: PLR0912, PLR0915 - lazy service orchestration.
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     config.temp_dir.mkdir(parents=True, exist_ok=True)
-    if config.generate_ass:
-        provide_render_fonts(config.output_dir)
     videos = discover_videos(config.input_dir, config.normalized_extension())
     if video_limit is not None:
         if video_limit <= 0:
@@ -78,8 +68,7 @@ def process_directory(  # noqa: PLR0912, PLR0915 - lazy service orchestration.
 
     transcriber: WhisperTranscriber | None = None
     diarizer: PyannoteDiarizer | None = None
-    lexical_translator: InterlinearGoogleTranslator | None = None
-    annotator: PedagogicalAnnotator | None = None
+    translator: InterlinearGoogleTranslator | None = None
 
     generated_files: list[Path] = []
     for index, video_path in enumerate(videos, start=1):
@@ -99,38 +88,18 @@ def process_directory(  # noqa: PLR0912, PLR0915 - lazy service orchestration.
                         device=config.device,
                     )
 
-            if _needs_translation(video_path, config):
-                if lexical_translator is None:
-                    lexical_translator = InterlinearGoogleTranslator(
-                        source_language=config.translation_source_language,
-                        target_language=config.translation_target_language,
-                    )
-                progress = None
-                if on_progress is not None:
-
-                    def progress(
-                        stage: str,
-                        current: int,
-                        total: int,
-                        path: Path = video_path,
-                    ) -> None:
-                        on_progress(path, stage, current, total)
-
-                if annotator is None:
-                    annotator = PedagogicalAnnotator(
-                        config=config,
-                        lexical_translator=lexical_translator,
-                        progress=progress,
-                    )
-                else:
-                    annotator.progress = progress
+            if _needs_translation(video_path, config) and translator is None:
+                translator = InterlinearGoogleTranslator(
+                    source_language=config.translation_source_language,
+                    target_language=config.translation_target_language,
+                )
 
             video_outputs = process_video(
                 video_path,
                 config=config,
                 transcriber=transcriber,
                 diarizer=diarizer,
-                annotator=annotator,
+                translator=translator,
             )
             generated_files.extend(video_outputs)
         except Exception as exc:  # noqa: BLE001 - isolate failures per video.
@@ -179,7 +148,7 @@ def process_video(  # noqa: PLR0912, PLR0915 - keep orchestration cleanup togeth
     config: ProcessingConfig,
     transcriber: WhisperTranscriber | None,
     diarizer: PyannoteDiarizer | None,
-    annotator: PedagogicalAnnotator | None,
+    translator: InterlinearGoogleTranslator | None,
 ) -> list[Path]:
     """Process one video and return generated subtitle paths."""
     srt_path, ass_path = _subtitle_paths(video_path, config.output_dir)
@@ -203,21 +172,17 @@ def process_video(  # noqa: PLR0912, PLR0915 - keep orchestration cleanup togeth
             and _has_content(srt_path)
         )
         if can_reuse_srt:
-            if annotator is None:
-                msg = "ASS generation requires a linguistic annotator."
+            if translator is None:
+                msg = "ASS generation requires a translator."
                 raise ValueError(msg)
-            subtitles = parse_srt(srt_path)
-            annotated = annotator.annotate(subtitles)
-            write_annotated_ass(ass_path, annotated, config)
-            annotator.report("ass", 1, 1)
-            LOGGER.info("ASS ready: %s", ass_path)
+            write_ass(ass_path, parse_srt(srt_path), translator)
             return [path for path in requested_paths if _has_content(path)]
 
     if transcriber is None:
         msg = "Transcription is required but no transcriber was provided."
         raise ValueError(msg)
-    if config.generate_ass and annotator is None:
-        msg = "ASS generation requires a linguistic annotator."
+    if config.generate_ass and translator is None:
+        msg = "ASS generation requires a translator."
         raise ValueError(msg)
 
     audio_path = config.temp_dir / f"{video_path.stem}.wav"
@@ -257,18 +222,15 @@ def process_video(  # noqa: PLR0912, PLR0915 - keep orchestration cleanup togeth
         subtitles = prepare_subtitles(transcribed, config=config)
         LOGGER.info("Final subtitle segments: %s", len(subtitles))
 
-        LOGGER.info("Step 6/7 - Writing transcription output")
+        LOGGER.info("Step 6/6 - Writing subtitle files")
         generated_files: list[Path] = []
         if config.generate_srt:
             write_srt(srt_path, subtitles)
             LOGGER.info("SRT ready: %s", srt_path)
             generated_files.append(srt_path)
         if config.generate_ass:
-            assert annotator is not None
-            LOGGER.info("Step 7/7 - Annotating complete transcript")
-            annotated = annotator.annotate(subtitles)
-            write_annotated_ass(ass_path, annotated, config)
-            annotator.report("ass", 1, 1)
+            assert translator is not None
+            write_ass(ass_path, subtitles, translator)
             LOGGER.info("ASS ready: %s", ass_path)
             generated_files.append(ass_path)
         return generated_files

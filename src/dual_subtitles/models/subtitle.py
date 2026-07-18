@@ -1,9 +1,8 @@
-"""Subtitle and linguistic annotation domain models."""
+"""Subtitle domain models."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import StrEnum
+from dataclasses import dataclass
 from typing import Protocol
 
 
@@ -31,131 +30,16 @@ class SubtitleSegment:
     speaker: str = "SPEAKER_00"
 
 
-class TokenKind(StrEnum):
-    """Kinds emitted by the lossless tokenizer."""
-
-    WORD = "word"
-    PUNCTUATION = "punctuation"
-
-
-class SpanKind(StrEnum):
-    """Pedagogical display grouping."""
-
-    TOKEN = "token"
-    ENTITY = "entity"
-    EXPRESSION = "expression"
-
-
-class EntityType(StrEnum):
-    """Named-entity categories supported by the Arabic NER backend."""
-
-    PERSON = "person"
-    LOCATION = "location"
-    ORGANIZATION = "organization"
-    MISC = "misc"
-
-
-@dataclass(frozen=True, slots=True)
-class ConfidenceBreakdown:
-    """Independent confidence signals; missing models leave a value at zero."""
-
-    morphology: float = 0.0
-    diacritization: float = 0.0
-    ner: float = 0.0
-    gloss: float = 0.0
-    overall: float = 0.0
-
-
-@dataclass(slots=True)
-class AnnotatedToken:
-    """One exact token from a subtitle plus its linguistic annotations."""
-
-    token_id: str
-    subtitle_index: int
-    token_index: int
-    start_char: int
-    end_char: int
-    surface: str
-    kind: TokenKind
-    lemma: str | None = None
-    root: str | None = None
-    part_of_speech: str | None = None
-    features: dict[str, str] = field(default_factory=dict)
-    vocalized_surface: str | None = None
-    entity_id: str | None = None
-    entity_type: EntityType | None = None
-    transliteration: str | None = None
-    gloss: str | None = None
-    confidence: ConfidenceBreakdown = field(default_factory=ConfidenceBreakdown)
-    warnings: list[str] = field(default_factory=list)
-
-    @property
-    def display_surface(self) -> str:
-        """Return a trusted vocalization or the exact transcript surface."""
-        return self.vocalized_surface or self.surface
-
-
-@dataclass(slots=True)
-class AnnotatedSpan:
-    """A contiguous token group displayed as one pedagogical pair."""
-
-    span_id: str
-    subtitle_index: int
-    token_start: int
-    token_end: int
-    kind: SpanKind
-    source_surface: str
-    display_source: str
-    gloss: str
-    transliteration: str | None = None
-    entity_id: str | None = None
-    confidence: ConfidenceBreakdown = field(default_factory=ConfidenceBreakdown)
-    warnings: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class AnnotatedSubtitle:
-    """A subtitle enriched after the complete video transcript is available."""
-
-    segment: SubtitleSegment
-    subtitle_index: int
-    tokens: list[AnnotatedToken]
-    context_indices: tuple[int, ...] = ()
-    spans: list[AnnotatedSpan] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class EntityRecord:
-    """Canonical per-video representation of one detected entity."""
-
-    entity_id: str
-    entity_type: EntityType
-    canonical_source: str
-    canonical_target: str
-    aliases: set[str] = field(default_factory=set)
-    confidence: float = 0.0
-
-
-@dataclass(slots=True)
-class AnnotatedVideo:
-    """Complete annotated transcript and its automatic entity memory."""
-
-    subtitles: list[AnnotatedSubtitle]
-    entities: dict[str, EntityRecord] = field(default_factory=dict)
-    warnings: list[str] = field(default_factory=list)
-
-
 @dataclass(frozen=True, slots=True)
 class WordPair:
-    """Compatibility view for callers using the former rendering contract."""
+    """A source word and its literal translated gloss."""
 
     source: str
     translation: str
 
 
 class InterlinearTranslator(Protocol):
-    """Compatibility protocol for the legacy ASS builder."""
+    """Protocol for objects that build ASS interlinear text."""
 
     def interlinear(self, text: str) -> str:
         """Return subtitle text with translated text on a second ASS line."""
