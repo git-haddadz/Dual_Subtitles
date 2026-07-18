@@ -201,9 +201,9 @@ def process_video(  # noqa: PLR0912, PLR0915 - keep orchestration cleanup togeth
     audio_path = config.temp_dir / f"{video_path.stem}.wav"
     chunk_path = config.temp_dir / f"{video_path.stem}.chunk.wav"
     try:
-        LOGGER.info("Step 1/6 - Extracting audio from %s", video_path.name)
+        LOGGER.info("Step 1/8 - Extracting audio from %s", video_path.name)
         extract_audio(video_path, audio_path)
-        LOGGER.info("Step 2/6 - Normalizing audio to mono 16 kHz")
+        LOGGER.info("Step 2/8 - Normalizing audio to mono 16 kHz")
         normalize_audio(audio_path, audio_path)
         audio = load_audio(audio_path)
 
