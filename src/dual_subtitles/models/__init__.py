@@ -4,6 +4,14 @@ from dual_subtitles.models.subtitle import (
     InterlinearTranslator,
     Segment,
     SubtitleSegment,
+    SuspiciousPassage,
+    TranscribedWord,
 )
 
-__all__ = ["InterlinearTranslator", "Segment", "SubtitleSegment"]
+__all__ = [
+    "InterlinearTranslator",
+    "Segment",
+    "SubtitleSegment",
+    "SuspiciousPassage",
+    "TranscribedWord",
+]

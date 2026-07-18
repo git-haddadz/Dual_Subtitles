@@ -8,10 +8,11 @@ jusqu'a la generation des fichiers SRT et ASS.
 ```text
 Video MP4
   -> extraction et normalisation audio
-  -> diarisation des locuteurs
-  -> segmentation des zones de parole
-  -> transcription Whisper
-  -> nettoyage et regroupement
+  -> fenetres audio continues coupees sur les silences
+  -> transcription Whisper avec timestamps de mots
+  -> fusion des chevauchements et reprises ciblees
+  -> diarisation et attribution des locuteurs
+  -> reconstruction des segments SRT
   -> traduction litterale mot a mot
   -> ecriture SRT et rendu ASS interlineaire
 ```
@@ -27,7 +28,10 @@ La classe `ProcessingConfig`, dans
 - les dossiers d'entree, de sortie et de travail temporaire;
 - les langues de transcription, source et cible;
 - les modeles Whisper et pyannote;
-- les seuils de segmentation, de fusion et de padding;
+- la duree cible et maximale des fenetres acoustiques;
+- leur chevauchement et les seuils de detection des silences;
+- les seuils de segmentation et de fusion des sous-titres;
+- les seuils de detection et d'acceptation des reprises ciblees;
 - la taille maximale des segments et sous-titres;
 - l'activation des sorties SRT, ASS et de la diarisation;
 - le peripherique d'execution CPU ou GPU.
@@ -78,51 +82,69 @@ Chaque erreur est journalisee sans interrompre les videos suivantes.
 Les fichiers WAV et chunks temporaires sont supprimes apres chaque video, y
 compris lorsqu'une etape echoue.
 
-## 4. Diarisation
+## 4. Fenetres Acoustiques Et Transcription
+
+Le pipeline ne decoupe plus l'audio selon les tours de parole avant Whisper.
+Il cherche d'abord les silences, puis construit des fenetres continues de 28
+secondes par defaut, limitees a 30 secondes, avec une seconde de
+chevauchement. En l'absence d'un silence convenable, la limite temporelle
+cible sert de repli.
+
+`WhisperTranscriber` demande les timestamps de mots et utilise un faisceau de
+5 candidats. Chaque timestamp est converti dans le temps global de la video.
+Les occurrences issues des zones de chevauchement sont fusionnees seulement
+si leur texte et leurs positions temporelles correspondent. Une repetition
+reellement prononcee a un autre instant est conservee.
+
+## 5. Controle Et Reprise Ciblee
+
+Apres la premiere transcription, le pipeline recherche les passages suspects:
+
+- confiance disponible inferieure au seuil configure;
+- timestamp invalide;
+- repetition rapprochee d'au moins trois occurrences;
+- mot refuse par un validateur lexical optionnel.
+
+Un passage suspect est retranscrit avec du contexte audio avant et apres. La
+nouvelle version remplace l'original uniquement si son score comparatif depasse
+le seuil d'amelioration. Sans preuve suffisante, le texte Whisper initial est
+conserve. Le validateur lexical constitue un signal de detection et ne corrige
+jamais directement un mot.
+
+## 6. Diarisation Apres Transcription
 
 `src/dual_subtitles/services/diarization.py` encapsule pyannote.
 
 Lorsque la diarisation est activee:
 
 1. `PyannoteDiarizer` lit `HUGGINGFACE_TOKEN`;
-2. le pipeline `pyannote/speaker-diarization-3.1` est charge;
+2. le pipeline `pyannote/speaker-diarization-3.1` est charge paresseusement,
+   apres la transcription;
 3. les tours de parole sont convertis en objets `Segment`;
-4. le pipeline pyannote est deplace sur CUDA lorsqu'un GPU est selectionne.
+4. chaque mot est attribue au locuteur qui le recouvre le plus longtemps;
+5. une egalite conserve le locuteur precedent pour eviter les changements
+   instables;
+6. le pipeline pyannote est deplace sur CUDA lorsqu'un GPU est selectionne.
 
-Sans diarisation, `SingleSpeakerDiarizer` cree un segment couvrant toute la
-duree de l'audio.
+Sans diarisation, `SingleSpeakerDiarizer` attribue le meme locuteur a tous les
+mots.
 
 Le token Hugging Face est lu depuis l'environnement. Il n'est ni ecrit dans les
 sous-titres ni conserve par le package.
 
-## 5. Segmentation Et Transcription
+## 7. Reconstruction Du SRT
 
-Les segments de parole passent par
-`src/dual_subtitles/core/segmentation.py`:
+`src/dual_subtitles/core/transcript.py` reconstruit les sous-titres depuis les
+mots horodates. Une nouvelle unite commence selon les silences, la ponctuation,
+le changement de locuteur, la duree maximale ou le nombre maximal de mots. Les
+timestamps invalides sont elimines et les sous-titres longs recoivent un retour
+a la ligne.
 
-- suppression des segments trop courts;
-- fusion des segments proches appartenant au meme locuteur;
-- decoupage des segments trop longs;
-- ajout d'un padding audio autour de chaque chunk.
-
-`WhisperTranscriber`, dans
-`src/dual_subtitles/services/transcription.py`, transcrit ensuite chaque
-segment avec ses timestamps et son locuteur.
-
-Sur CUDA, Whisper utilise `float16`. Sur CPU, il utilise `float32`. Les
-timestamps produits sont decales selon le debut reel du chunk, borne a zero.
-
-Apres transcription:
-
-- les textes vides et timestamps invalides sont supprimes;
-- les chevauchements temporels sont corriges;
-- les mots repetes aux frontieres du padding sont dedupliques;
-- les petits fragments sont regroupes sans depasser les limites configurees;
-- les sous-titres longs recoivent un retour a la ligne pour le SRT.
+Sur CUDA, Whisper utilise `float16`. Sur CPU, il utilise `float32`.
 
 La progression est journalisee segment par segment avec un pourcentage.
 
-## 6. Traduction Mot A Mot
+## 8. Traduction Mot A Mot
 
 `src/dual_subtitles/services/translation.py` utilise `deep-translator`.
 
@@ -140,7 +162,7 @@ secours.
 une representation textuelle sur deux lignes. Le rendu ASS utilise directement
 les paires structurees.
 
-## 7. Rendu ASS Interlineaire
+## 9. Rendu ASS Interlineaire
 
 `src/dual_subtitles/io/subtitle_files.py` genere un script ASS sur une base
 virtuelle `1280x720`.
@@ -168,7 +190,7 @@ involontaires.
 
 La progression de la traduction ASS est journalisee sous-titre par sous-titre.
 
-## 8. Sorties SRT Et ASS
+## 10. Sorties SRT Et ASS
 
 Le module `src/dual_subtitles/io/subtitle_files.py` fournit:
 
@@ -183,7 +205,7 @@ Chaque fichier est annonce dans les logs des qu'il est disponible. Le callback
 de fin de video permet au notebook d'afficher `TERMINE` sans attendre la fin
 du lot complet.
 
-## 9. Execution Dans Google Colab
+## 11. Execution Dans Google Colab
 
 `subtitles_gen.ipynb` sert de runner:
 
@@ -201,7 +223,7 @@ temporaires restent dans `/content`.
 La cellule de traitement utilise `VIDEO_LIMIT = None` pour traiter tout le
 dossier. La valeur `1` permet un essai rapide sur la premiere video.
 
-## 10. Architecture Du Package
+## 12. Architecture Du Package
 
 ```text
 src/dual_subtitles/
@@ -210,7 +232,8 @@ src/dual_subtitles/
 |-- core/
 |   |-- config.py
 |   |-- pipeline.py
-|   `-- segmentation.py
+|   |-- segmentation.py
+|   `-- transcript.py
 |-- io/
 |   |-- audio.py
 |   `-- subtitle_files.py
@@ -232,7 +255,7 @@ src/dual_subtitles/
 - `cli.py`: interface de ligne de commande;
 - `main.py`: point d'entree executable.
 
-## 11. CLI Et Verification
+## 13. CLI Et Verification
 
 Commande locale:
 

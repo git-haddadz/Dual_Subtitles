@@ -21,7 +21,7 @@ class PyannoteDiarizer:
     model_name: str = "pyannote/speaker-diarization-3.1"
     token_env_var: str = "HUGGINGFACE_TOKEN"
     device: int | str | None = None
-    _pipeline: Any = field(init=False, repr=False)
+    _pipeline: Any = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         """Load the pyannote pipeline after validating the token."""
@@ -34,16 +34,22 @@ class PyannoteDiarizer:
             )
             raise MissingHuggingFaceTokenError(msg)
 
+    def _load_pipeline(self) -> Any:
+        """Load pyannote only when diarization actually starts."""
+        if self._pipeline is not None:
+            return self._pipeline
         import torch
         from pyannote.audio import Pipeline
 
-        self._pipeline = Pipeline.from_pretrained(
+        pipeline = Pipeline.from_pretrained(
             self.model_name,
-            use_auth_token=token,
+            use_auth_token=os.environ[self.token_env_var],
         )
         target_device = self._resolve_device(torch)
         if target_device.type == "cuda":
-            self._pipeline.to(target_device)
+            pipeline.to(target_device)
+        self._pipeline = pipeline
+        return pipeline
 
     def _resolve_device(self, torch: Any) -> Any:
         """Resolve the configured pyannote execution device."""
@@ -57,7 +63,7 @@ class PyannoteDiarizer:
 
     def detect(self, audio_path: Path) -> list[Segment]:
         """Detect speaker turns in an audio file."""
-        result = self._pipeline(str(audio_path))
+        result = self._load_pipeline()(str(audio_path))
         segments: list[Segment] = []
         for turn, _, speaker in result.itertracks(yield_label=True):
             segments.append(

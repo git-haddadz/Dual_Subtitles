@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -45,3 +46,27 @@ def load_audio(path: Path) -> Any:
     from pydub import AudioSegment
 
     return AudioSegment.from_file(path)
+
+
+def detect_silence_boundaries(
+    audio: Any,
+    *,
+    min_silence_duration: float,
+    threshold_offset: float,
+) -> list[float]:
+    """Return silence midpoints in seconds for acoustic window boundaries."""
+    from pydub.silence import detect_silence
+
+    if len(audio) == 0:
+        return []
+    audio_level = float(audio.dBFS)
+    silence_threshold = (
+        audio_level - threshold_offset if math.isfinite(audio_level) else -50.0
+    )
+    ranges = detect_silence(
+        audio,
+        min_silence_len=max(1, round(min_silence_duration * 1000)),
+        silence_thresh=silence_threshold,
+        seek_step=10,
+    )
+    return [(start + end) / 2000 for start, end in ranges]

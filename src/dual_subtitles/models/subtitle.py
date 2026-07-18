@@ -31,6 +31,26 @@ class SubtitleSegment:
 
 
 @dataclass(frozen=True, slots=True)
+class TranscribedWord:
+    """A word emitted by the speech recognizer with global timestamps."""
+
+    start: float
+    end: float
+    text: str
+    confidence: float | None = None
+    speaker: str = "SPEAKER_00"
+
+
+@dataclass(frozen=True, slots=True)
+class SuspiciousPassage:
+    """A transcript interval that may benefit from a targeted retry."""
+
+    start: float
+    end: float
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class WordPair:
     """A source word and its literal translated gloss."""
 

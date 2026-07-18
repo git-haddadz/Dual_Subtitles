@@ -38,6 +38,24 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--subtitle-gap-threshold", default=0.25, type=float)
     process.add_argument("--max-subtitle-duration", default=2.5, type=float)
     process.add_argument("--transcription-padding", default=0.3, type=float)
+    process.add_argument("--transcription-window-duration", default=28.0, type=float)
+    process.add_argument(
+        "--transcription-max-window-duration",
+        default=30.0,
+        type=float,
+    )
+    process.add_argument("--transcription-overlap", default=1.0, type=float)
+    process.add_argument("--transcription-num-beams", default=5, type=int)
+    process.add_argument("--silence-min-duration", default=0.4, type=float)
+    process.add_argument("--silence-threshold-offset", default=16.0, type=float)
+    process.add_argument(
+        "--suspicious-confidence-threshold",
+        default=0.45,
+        type=float,
+    )
+    process.add_argument("--retry-context", default=4.0, type=float)
+    process.add_argument("--retry-min-improvement", default=0.12, type=float)
+    process.add_argument("--no-targeted-retry", action="store_true")
     process.add_argument("--max-words-per-subtitle", default=8, type=int)
     process.add_argument("--line-break-words", default=6, type=int)
     process.add_argument("--device")
@@ -85,6 +103,16 @@ def _process(args: argparse.Namespace, temp_dir: Path) -> int:
         subtitle_gap_threshold=args.subtitle_gap_threshold,
         max_subtitle_duration=args.max_subtitle_duration,
         transcription_padding=args.transcription_padding,
+        transcription_window_duration=args.transcription_window_duration,
+        transcription_max_window_duration=(args.transcription_max_window_duration),
+        transcription_overlap=args.transcription_overlap,
+        transcription_num_beams=args.transcription_num_beams,
+        silence_min_duration=args.silence_min_duration,
+        silence_threshold_offset=args.silence_threshold_offset,
+        suspicious_confidence_threshold=(args.suspicious_confidence_threshold),
+        retry_context=args.retry_context,
+        retry_min_improvement=args.retry_min_improvement,
+        enable_targeted_retry=not args.no_targeted_retry,
         max_words_per_subtitle=args.max_words_per_subtitle,
         line_break_words=args.line_break_words,
         generate_srt=not args.no_srt,

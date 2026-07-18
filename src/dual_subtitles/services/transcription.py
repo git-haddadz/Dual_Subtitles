@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from dual_subtitles.models.subtitle import Segment, SubtitleSegment
+from dual_subtitles.models.subtitle import Segment, SubtitleSegment, TranscribedWord
 
 
 @dataclass(slots=True)
@@ -50,8 +50,12 @@ class WhisperTranscriber:
             str(audio_path),
             chunk_length_s=chunk_length_seconds,
             stride_length_s=stride_length_seconds,
-            return_timestamps=True,
-            generate_kwargs={"language": language, "task": "transcribe"},
+            return_timestamps="word",
+            generate_kwargs={
+                "language": language,
+                "task": "transcribe",
+                "num_beams": 5,
+            },
         )
         return _chunks_to_segments(result, speaker="SPEAKER_00", offset=0.0)
 
@@ -64,14 +68,42 @@ class WhisperTranscriber:
         offset: float,
     ) -> list[SubtitleSegment]:
         """Transcribe an extracted segment and offset timestamps globally."""
+        words = self.transcribe_window(
+            audio_path,
+            language=language,
+            offset=offset,
+        )
+        return [
+            SubtitleSegment(
+                start=word.start,
+                end=word.end,
+                text=word.text,
+                speaker=segment.speaker,
+            )
+            for word in words
+        ]
+
+    def transcribe_window(
+        self,
+        audio_path: Path,
+        *,
+        language: str,
+        offset: float,
+        num_beams: int = 5,
+    ) -> list[TranscribedWord]:
+        """Transcribe one continuous acoustic window into timestamped words."""
         result = self._pipeline(
             str(audio_path),
             chunk_length_s=30,
-            stride_length_s=5,
-            return_timestamps=True,
-            generate_kwargs={"language": language, "task": "transcribe"},
+            stride_length_s=1,
+            return_timestamps="word",
+            generate_kwargs={
+                "language": language,
+                "task": "transcribe",
+                "num_beams": num_beams,
+            },
         )
-        return _chunks_to_segments(result, speaker=segment.speaker, offset=offset)
+        return _chunks_to_words(result, offset=offset)
 
 
 def _chunks_to_segments(
@@ -99,3 +131,30 @@ def _chunks_to_segments(
             )
         )
     return segments
+
+
+def _chunks_to_words(
+    result: dict[str, Any],
+    *,
+    offset: float,
+) -> list[TranscribedWord]:
+    """Convert Transformers word chunks to domain objects."""
+    words: list[TranscribedWord] = []
+    for chunk in result.get("chunks", []):
+        start, end = chunk.get("timestamp", (None, None))
+        if start is None or end is None:
+            continue
+        text = str(chunk.get("text", "")).strip()
+        if not text:
+            continue
+        raw_confidence = chunk.get("confidence", chunk.get("score"))
+        confidence = float(raw_confidence) if raw_confidence is not None else None
+        words.append(
+            TranscribedWord(
+                start=float(start) + offset,
+                end=float(end) + offset,
+                text=text,
+                confidence=confidence,
+            )
+        )
+    return words

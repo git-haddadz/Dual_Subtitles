@@ -24,6 +24,16 @@ class ProcessingConfig:
     subtitle_gap_threshold: float = 0.25
     max_subtitle_duration: float = 2.5
     transcription_padding: float = 0.3
+    transcription_window_duration: float = 28.0
+    transcription_max_window_duration: float = 30.0
+    transcription_overlap: float = 1.0
+    transcription_num_beams: int = 5
+    silence_min_duration: float = 0.4
+    silence_threshold_offset: float = 16.0
+    suspicious_confidence_threshold: float = 0.45
+    retry_context: float = 4.0
+    retry_min_improvement: float = 0.12
+    enable_targeted_retry: bool = True
     max_words_per_subtitle: int = 8
     line_break_words: int = 6
     generate_srt: bool = True
@@ -45,6 +55,12 @@ class ProcessingConfig:
             "max_subtitle_duration": self.max_subtitle_duration,
             "max_words_per_subtitle": self.max_words_per_subtitle,
             "line_break_words": self.line_break_words,
+            "transcription_window_duration": (self.transcription_window_duration),
+            "transcription_max_window_duration": (
+                self.transcription_max_window_duration
+            ),
+            "transcription_num_beams": self.transcription_num_beams,
+            "silence_min_duration": self.silence_min_duration,
         }
         for name, value in positive_values.items():
             if value <= 0:
@@ -55,10 +71,33 @@ class ProcessingConfig:
             "merge_gap": self.merge_gap,
             "subtitle_gap_threshold": self.subtitle_gap_threshold,
             "transcription_padding": self.transcription_padding,
+            "transcription_overlap": self.transcription_overlap,
+            "silence_threshold_offset": self.silence_threshold_offset,
+            "suspicious_confidence_threshold": (self.suspicious_confidence_threshold),
+            "retry_context": self.retry_context,
+            "retry_min_improvement": self.retry_min_improvement,
         }
         for name, value in non_negative_values.items():
             if value < 0:
                 msg = f"{name} must be zero or greater."
+                raise ValueError(msg)
+
+        if self.transcription_window_duration > self.transcription_max_window_duration:
+            msg = (
+                "transcription_window_duration must not exceed "
+                "transcription_max_window_duration."
+            )
+            raise ValueError(msg)
+        if self.transcription_overlap >= self.transcription_window_duration:
+            msg = "transcription_overlap must be shorter than the window."
+            raise ValueError(msg)
+        for name in (
+            "suspicious_confidence_threshold",
+            "retry_min_improvement",
+        ):
+            value = getattr(self, name)
+            if value > 1:
+                msg = f"{name} must not exceed one."
                 raise ValueError(msg)
 
         if not self.normalized_extension().strip("."):
