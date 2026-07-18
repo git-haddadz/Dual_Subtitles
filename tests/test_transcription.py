@@ -1,7 +1,12 @@
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
-from dual_subtitles.services.transcription import WhisperTranscriber, _chunks_to_words
+from dual_subtitles.services.transcription import (
+    WhisperTranscriber,
+    _chunks_to_words,
+    _faster_segments_to_words,
+)
 
 
 def test_chunks_to_words_preserve_global_timestamps_and_confidence() -> None:
@@ -24,6 +29,35 @@ def test_chunks_to_words_preserve_global_timestamps_and_confidence() -> None:
     assert words[0].end == 10.6
     assert words[0].confidence == 0.8
     assert words[1].confidence is None
+
+
+def test_faster_whisper_words_keep_scores_and_global_timestamps() -> None:
+    words = _faster_segments_to_words(
+        [
+            SimpleNamespace(
+                avg_logprob=-0.3,
+                compression_ratio=1.2,
+                no_speech_prob=0.05,
+                words=[
+                    SimpleNamespace(
+                        word=" word ",
+                        start=0.2,
+                        end=0.6,
+                        probability=0.91,
+                    )
+                ],
+            )
+        ],
+        offset=10.0,
+    )
+
+    assert words[0].text == "word"
+    assert words[0].start == 10.2
+    assert words[0].end == 10.6
+    assert words[0].confidence == 0.91
+    assert words[0].average_log_probability == -0.3
+    assert words[0].compression_ratio == 1.2
+    assert words[0].no_speech_probability == 0.05
 
 
 class FailingBeamPipeline:

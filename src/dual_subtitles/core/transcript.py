@@ -23,6 +23,10 @@ LexicalValidator = Callable[[str], bool]
 MAX_REPETITION_INTERVAL = 5.0
 SUSPICIOUS_GROUP_GAP = 0.6
 OVERLAP_TIE_TOLERANCE = 1e-6
+MIN_WORD_DURATION = 0.08
+SEQUENCE_OVERLAP_LIMIT = 16
+SEQUENCE_TIMESTAMP_TOLERANCE = 1.25
+TEMPORAL_CONFLICT_IOU = 0.7
 
 
 def build_audio_windows(
@@ -97,6 +101,80 @@ def merge_overlapping_words(
         if _confidence(word) > _confidence(existing):
             merged[duplicate_index] = word
     return sorted(merged, key=lambda word: (word.start, word.end))
+
+
+def merge_window_transcripts(
+    windows: Iterable[Iterable[TranscribedWord]],
+) -> list[TranscribedWord]:
+    """Fuse overlapping window sequences using text, time, and confidence."""
+    merged: list[TranscribedWord] = []
+    for raw_window in windows:
+        window = sorted(raw_window, key=lambda word: (word.start, word.end))
+        if not window:
+            continue
+        if not merged:
+            merged.extend(window)
+            continue
+
+        overlap_size = _longest_sequence_overlap(merged, window)
+        if overlap_size:
+            first_merged = len(merged) - overlap_size
+            for offset in range(overlap_size):
+                existing_index = first_merged + offset
+                merged[existing_index] = _preferred_word(
+                    merged[existing_index],
+                    window[offset],
+                )
+            window = window[overlap_size:]
+
+        for candidate in window:
+            conflict = _find_temporal_conflict(merged, candidate)
+            if conflict is None:
+                merged.append(candidate)
+            else:
+                merged[conflict] = _preferred_word(merged[conflict], candidate)
+        merged.sort(key=lambda word: (word.start, word.end))
+    return merge_overlapping_words(merged)
+
+
+def repair_word_timestamps(
+    words: Iterable[TranscribedWord],
+    *,
+    max_duration: float,
+    min_duration: float = MIN_WORD_DURATION,
+) -> list[TranscribedWord]:
+    """Repair invalid word bounds while preserving their acoustic origin."""
+    ordered = sorted(words, key=lambda word: (word.start, word.end))
+    repaired: list[TranscribedWord] = []
+    for index, word in enumerate(ordered):
+        acoustic_start = (
+            word.acoustic_start if word.acoustic_start is not None else word.start
+        )
+        acoustic_end = word.acoustic_end if word.acoustic_end is not None else word.end
+        start = max(0.0, word.start)
+        end = word.end
+        next_start = ordered[index + 1].start if index + 1 < len(ordered) else None
+
+        if end - start > max_duration:
+            end = start + max_duration
+        if next_start is not None and next_start > start:
+            end = min(end, next_start)
+        if end - start < min_duration:
+            end = start + min_duration
+            if next_start is not None and next_start > start:
+                end = min(end, next_start)
+        if end <= start:
+            continue
+        repaired.append(
+            replace(
+                word,
+                start=start,
+                end=end,
+                acoustic_start=acoustic_start,
+                acoustic_end=acoustic_end,
+            )
+        )
+    return repaired
 
 
 def assign_speakers(
@@ -182,10 +260,45 @@ def words_to_subtitles(
     ]
 
 
-def detect_suspicious_passages(
+def repair_subtitle_timestamps(
+    segments: Iterable[SubtitleSegment],
+    *,
+    min_duration: float,
+    max_duration: float,
+    max_words: int,
+    merge_gap: float,
+) -> list[SubtitleSegment]:
+    """Merge flashing fragments and enforce safe display durations."""
+    merged = _merge_short_subtitles(
+        list(segments),
+        min_duration=min_duration,
+        max_duration=max_duration,
+        max_words=max_words,
+        merge_gap=merge_gap,
+    )
+    repaired: list[SubtitleSegment] = []
+    for index, segment in enumerate(merged):
+        start = max(0.0, segment.start)
+        end = min(segment.end, start + max_duration)
+        next_start = merged[index + 1].start if index + 1 < len(merged) else None
+        if end - start < min_duration:
+            end = start + min_duration
+            if next_start is not None and next_start > start:
+                end = min(end, max(start + MIN_WORD_DURATION, next_start - 0.02))
+        if end <= start:
+            continue
+        repaired.append(replace(segment, start=start, end=end))
+    return repaired
+
+
+def detect_suspicious_passages(  # noqa: PLR0912, PLR0913
     words: Iterable[TranscribedWord],
     *,
     confidence_threshold: float,
+    log_probability_threshold: float = -1.0,
+    compression_ratio_threshold: float = 2.4,
+    no_speech_threshold: float = 0.6,
+    max_word_duration: float = 3.0,
     lexical_validator: LexicalValidator | None = None,
 ) -> list[SuspiciousPassage]:
     """Find low-confidence, repeated, or linguistically suspect intervals."""
@@ -196,6 +309,23 @@ def detect_suspicious_passages(
         reasons: set[str] = set()
         if word.confidence is not None and word.confidence < confidence_threshold:
             reasons.add("low_confidence")
+        if (
+            word.average_log_probability is not None
+            and word.average_log_probability < log_probability_threshold
+        ):
+            reasons.add("low_log_probability")
+        if (
+            word.compression_ratio is not None
+            and word.compression_ratio > compression_ratio_threshold
+        ):
+            reasons.add("high_compression")
+        if (
+            word.no_speech_probability is not None
+            and word.no_speech_probability > no_speech_threshold
+        ):
+            reasons.add("probable_silence")
+        if word.end - word.start > max_word_duration:
+            reasons.add("abnormal_duration")
         if word.end <= word.start:
             reasons.add("invalid_timestamp")
         if (
@@ -235,6 +365,17 @@ def transcript_quality(
         return 0.0
     confidences = [word.confidence for word in items if word.confidence is not None]
     score = fmean(confidences) if confidences else 0.5
+    log_probabilities = [
+        word.average_log_probability
+        for word in items
+        if word.average_log_probability is not None
+    ]
+    if log_probabilities:
+        normalized_log_probability = max(
+            0.0,
+            min(1.0, (fmean(log_probabilities) + 2.0) / 2.0),
+        )
+        score = (score + normalized_log_probability) / 2
 
     normalized = [_normalize_word(word.text) for word in items]
     repeated_triples = sum(
@@ -243,6 +384,10 @@ def transcript_quality(
     )
     score -= min(0.3, repeated_triples * 0.12)
     score -= sum(word.end <= word.start for word in items) * 0.2
+    score -= min(
+        0.25,
+        sum(word.no_speech_probability or 0.0 for word in items) / len(items) * 0.25,
+    )
     if lexical_validator is not None:
         unknown = sum(
             bool(ARABIC_LETTER.search(word.text)) and not lexical_validator(word.text)
@@ -308,6 +453,131 @@ def _find_duplicate(
     return None
 
 
+def _longest_sequence_overlap(
+    merged: list[TranscribedWord],
+    window: list[TranscribedWord],
+) -> int:
+    """Find the longest matching suffix/prefix near a window boundary."""
+    maximum = min(len(merged), len(window), SEQUENCE_OVERLAP_LIMIT)
+    for size in range(maximum, 0, -1):
+        previous = merged[-size:]
+        current = window[:size]
+        same_words = all(
+            _normalize_word(left.text) == _normalize_word(right.text)
+            and bool(_normalize_word(left.text))
+            for left, right in zip(previous, current, strict=True)
+        )
+        if not same_words:
+            continue
+        centers_are_close = all(
+            abs(_word_center(left) - _word_center(right))
+            <= SEQUENCE_TIMESTAMP_TOLERANCE
+            for left, right in zip(previous, current, strict=True)
+        )
+        if centers_are_close:
+            return size
+    return 0
+
+
+def _find_temporal_conflict(
+    merged: list[TranscribedWord],
+    candidate: TranscribedWord,
+) -> int | None:
+    """Locate a competing boundary hypothesis from another audio window."""
+    for index in range(len(merged) - 1, max(-1, len(merged) - 12), -1):
+        existing = merged[index]
+        if candidate.start - existing.end > SEQUENCE_TIMESTAMP_TOLERANCE:
+            break
+        if (
+            candidate.window_index is not None
+            and existing.window_index == candidate.window_index
+        ):
+            continue
+        if _normalize_word(existing.text) == _normalize_word(candidate.text):
+            continue
+        if _temporal_iou(existing, candidate) >= TEMPORAL_CONFLICT_IOU:
+            return index
+    return None
+
+
+def _preferred_word(
+    left: TranscribedWord,
+    right: TranscribedWord,
+) -> TranscribedWord:
+    """Choose the acoustically stronger duplicate or competing hypothesis."""
+    return right if _word_score(right) > _word_score(left) else left
+
+
+def _word_score(word: TranscribedWord) -> float:
+    confidence = word.confidence if word.confidence is not None else 0.5
+    log_probability = word.average_log_probability
+    normalized_log_probability = (
+        max(0.0, min(1.0, (log_probability + 2.0) / 2.0))
+        if log_probability is not None
+        else 0.5
+    )
+    no_speech = word.no_speech_probability or 0.0
+    compression_penalty = max(0.0, (word.compression_ratio or 0.0) - 2.4)
+    return (
+        confidence * 0.6
+        + normalized_log_probability * 0.4
+        - no_speech * 0.25
+        - min(0.25, compression_penalty * 0.1)
+    )
+
+
+def _temporal_iou(left: TranscribedWord, right: TranscribedWord) -> float:
+    intersection = max(0.0, min(left.end, right.end) - max(left.start, right.start))
+    union = max(left.end, right.end) - min(left.start, right.start)
+    return intersection / union if union > 0 else 0.0
+
+
+def _word_center(word: TranscribedWord) -> float:
+    return (word.start + word.end) / 2
+
+
+def _merge_short_subtitles(
+    segments: list[SubtitleSegment],
+    *,
+    min_duration: float,
+    max_duration: float,
+    max_words: int,
+    merge_gap: float,
+) -> list[SubtitleSegment]:
+    """Merge adjacent fragments when either would flash too briefly."""
+    ordered = sorted(segments, key=lambda segment: (segment.start, segment.end))
+    if not ordered:
+        return []
+
+    merged: list[SubtitleSegment] = []
+    for segment in ordered:
+        if not merged:
+            merged.append(segment)
+            continue
+        previous = merged[-1]
+        combined_words = len(previous.text.split()) + len(segment.text.split())
+        can_merge = (
+            previous.speaker == segment.speaker
+            and segment.start - previous.end <= merge_gap
+            and max(previous.end, segment.end) - previous.start <= max_duration
+            and combined_words <= max_words
+        )
+        needs_merge = (
+            previous.end - previous.start < min_duration
+            or segment.end - segment.start < min_duration
+        )
+        if can_merge and needs_merge:
+            merged[-1] = SubtitleSegment(
+                start=previous.start,
+                end=max(previous.end, segment.end),
+                text=f"{previous.text.rstrip()} {segment.text.lstrip()}",
+                speaker=previous.speaker,
+            )
+        else:
+            merged.append(segment)
+    return merged
+
+
 def _starts_new_subtitle(
     current: list[TranscribedWord],
     word: TranscribedWord,
@@ -338,7 +608,7 @@ def _group_suspicious_words(
         close_to_previous = (
             words[index].start - words[previous].end <= SUSPICIOUS_GROUP_GAP
         )
-        if index == previous + 1 or close_to_previous:
+        if close_to_previous:
             group.append(index)
             continue
         passages.append(_passage_from_indexes(words, group, reasons_by_index))

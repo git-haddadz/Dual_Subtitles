@@ -21,7 +21,9 @@ from dual_subtitles.core.transcript import (
     assign_speakers,
     build_audio_windows,
     detect_suspicious_passages,
-    merge_overlapping_words,
+    merge_window_transcripts,
+    repair_subtitle_timestamps,
+    repair_word_timestamps,
     replace_passage_if_better,
     words_to_subtitles,
 )
@@ -34,7 +36,11 @@ from dual_subtitles.io.audio import (
 from dual_subtitles.io.subtitle_files import parse_srt, write_ass, write_srt
 from dual_subtitles.models.subtitle import Segment, SubtitleSegment, TranscribedWord
 from dual_subtitles.services.diarization import PyannoteDiarizer, SingleSpeakerDiarizer
-from dual_subtitles.services.transcription import WhisperTranscriber
+from dual_subtitles.services.transcription import (
+    SpeechTranscriber,
+    WhisperTranscriber,
+    create_transcriber,
+)
 from dual_subtitles.services.translation import InterlinearGoogleTranslator
 
 LOGGER = logging.getLogger(__name__)
@@ -79,7 +85,7 @@ def process_directory(
         )
         return []
 
-    transcriber: WhisperTranscriber | None = None
+    transcriber: SpeechTranscriber | None = None
     diarizer: PyannoteDiarizer | None = None
     translator: InterlinearGoogleTranslator | None = None
 
@@ -91,9 +97,16 @@ def process_directory(
         try:
             if _needs_transcription(video_path, config):
                 if transcriber is None:
-                    transcriber = WhisperTranscriber(
+                    LOGGER.info(
+                        "Loading transcription backend %s (%s)",
+                        config.transcription_backend,
+                        config.whisper_model,
+                    )
+                    transcriber = create_transcriber(
+                        config.transcription_backend,
                         model_name=config.whisper_model,
                         device=config.device,
+                        compute_type=config.faster_whisper_compute_type,
                     )
                 if config.use_diarization and diarizer is None:
                     diarizer = PyannoteDiarizer(
@@ -159,7 +172,7 @@ def process_video(  # noqa: PLR0912, PLR0915 - keep orchestration cleanup togeth
     video_path: Path,
     *,
     config: ProcessingConfig,
-    transcriber: WhisperTranscriber | None,
+    transcriber: SpeechTranscriber | None,
     diarizer: PyannoteDiarizer | None,
     translator: InterlinearGoogleTranslator | None,
 ) -> list[Path]:
@@ -247,6 +260,10 @@ def process_video(  # noqa: PLR0912, PLR0915 - keep orchestration cleanup togeth
             transcriber=transcriber,
             temp_chunk=chunk_path,
         )
+        words = repair_word_timestamps(
+            words,
+            max_duration=config.max_word_duration,
+        )
 
         if config.use_diarization:
             if diarizer is None:
@@ -323,7 +340,14 @@ def prepare_word_subtitles(
         max_words=config.max_words_per_subtitle,
     )
     cleaned = clean_transcribed_segments(subtitles)
-    return add_line_breaks(cleaned, line_break_words=config.line_break_words)
+    repaired = repair_subtitle_timestamps(
+        cleaned,
+        min_duration=config.min_subtitle_duration,
+        max_duration=config.max_subtitle_duration,
+        max_words=config.max_words_per_subtitle,
+        merge_gap=config.subtitle_gap_threshold,
+    )
+    return add_line_breaks(repaired, line_break_words=config.line_break_words)
 
 
 def transcribe_audio_windows(
@@ -331,11 +355,12 @@ def transcribe_audio_windows(
     *,
     audio: Any,
     config: ProcessingConfig,
-    transcriber: WhisperTranscriber,
+    transcriber: SpeechTranscriber,
     temp_chunk: Path | None = None,
 ) -> list[TranscribedWord]:
     """Transcribe overlapping continuous windows independently of speakers."""
-    all_words: list[TranscribedWord] = []
+    window_transcripts: list[list[TranscribedWord]] = []
+    previous_words: list[TranscribedWord] = []
     window_list = list(windows)
     temp_chunk = temp_chunk or config.temp_dir / "continuous-window.wav"
     for index, window in enumerate(window_list, start=1):
@@ -351,18 +376,27 @@ def transcribe_audio_windows(
         start_ms = max(0, round(window.start * 1000))
         end_ms = min(len(audio), round(window.end * 1000))
         audio[start_ms:end_ms].export(temp_chunk, format="wav")
-        all_words.extend(
-            transcriber.transcribe_window(
-                temp_chunk,
-                language=config.transcription_language,
-                offset=start_ms / 1000,
-                num_beams=config.transcription_num_beams,
-            )
+        prompt = _build_transcription_prompt(
+            previous_words,
+            window_start=window.start,
+            max_words=config.transcription_context_words,
+            reset_pause=config.transcription_context_reset_pause,
         )
-    merged = merge_overlapping_words(all_words)
+        window_words = transcriber.transcribe_window(
+            temp_chunk,
+            language=config.transcription_language,
+            offset=start_ms / 1000,
+            num_beams=config.transcription_num_beams,
+            prompt=prompt,
+        )
+        window_words = [replace(word, window_index=index - 1) for word in window_words]
+        window_transcripts.append(window_words)
+        previous_words.extend(window_words)
+    all_word_count = sum(len(items) for items in window_transcripts)
+    merged = merge_window_transcripts(window_transcripts)
     LOGGER.info(
         "Whisper emitted %s words; %s remain after overlap fusion",
-        len(all_words),
+        all_word_count,
         len(merged),
     )
     return merged
@@ -373,7 +407,7 @@ def retry_suspicious_passages(
     *,
     audio: Any,
     config: ProcessingConfig,
-    transcriber: WhisperTranscriber,
+    transcriber: SpeechTranscriber,
     temp_chunk: Path | None = None,
 ) -> list[TranscribedWord]:
     """Retry suspect intervals with more context and conservative selection."""
@@ -383,6 +417,10 @@ def retry_suspicious_passages(
     passages = detect_suspicious_passages(
         selected,
         confidence_threshold=config.suspicious_confidence_threshold,
+        log_probability_threshold=(config.suspicious_log_probability_threshold),
+        compression_ratio_threshold=(config.suspicious_compression_ratio_threshold),
+        no_speech_threshold=config.suspicious_no_speech_threshold,
+        max_word_duration=config.max_word_duration,
     )
     LOGGER.info("Detected %s suspicious passages", len(passages))
     if not passages:
@@ -407,11 +445,19 @@ def retry_suspicious_passages(
         start_ms = round(context_start * 1000)
         end_ms = round(context_end * 1000)
         audio[start_ms:end_ms].export(temp_chunk, format="wav")
+        prompt = _build_transcription_prompt(
+            selected,
+            window_start=context_start,
+            max_words=config.transcription_context_words,
+            reset_pause=config.transcription_context_reset_pause,
+        )
         retry_words = transcriber.transcribe_window(
             temp_chunk,
             language=config.transcription_language,
             offset=context_start,
-            num_beams=config.transcription_num_beams,
+            num_beams=config.transcription_retry_num_beams,
+            prompt=prompt,
+            is_retry=True,
         )
         selected, replaced = replace_passage_if_better(
             selected,
@@ -428,6 +474,25 @@ def retry_suspicious_passages(
                 len(passages),
             )
     return selected
+
+
+def _build_transcription_prompt(
+    words: Iterable[TranscribedWord],
+    *,
+    window_start: float,
+    max_words: int,
+    reset_pause: float,
+) -> str | None:
+    """Build a short cross-window prompt unless a long pause resets context."""
+    previous = sorted(
+        (word for word in words if word.end <= window_start + 0.1),
+        key=lambda word: (word.start, word.end),
+    )
+    if not previous or window_start - previous[-1].end > reset_pause:
+        return None
+    prompt_words = [word.text.strip() for word in previous[-max_words:]]
+    prompt = " ".join(word for word in prompt_words if word)
+    return prompt or None
 
 
 def transcribe_segments(

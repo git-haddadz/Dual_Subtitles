@@ -5,11 +5,108 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from dual_subtitles.models.subtitle import Segment, SubtitleSegment, TranscribedWord
 
 LOGGER = logging.getLogger(__name__)
+
+
+class SpeechTranscriber(Protocol):
+    """Common contract implemented by local Whisper backends."""
+
+    def transcribe_window(  # noqa: PLR0913
+        self,
+        audio_path: Path,
+        *,
+        language: str,
+        offset: float,
+        num_beams: int = 5,
+        prompt: str | None = None,
+        is_retry: bool = False,
+    ) -> list[TranscribedWord]:
+        """Transcribe one continuous audio window."""
+        ...
+
+
+def create_transcriber(
+    backend: str,
+    *,
+    model_name: str,
+    device: int | str | None,
+    compute_type: str | None = None,
+) -> SpeechTranscriber:
+    """Create the configured local speech-recognition backend."""
+    if backend == "faster-whisper":
+        return FasterWhisperTranscriber(
+            model_name=model_name,
+            device=device,
+            compute_type=compute_type,
+        )
+    if backend == "transformers":
+        return WhisperTranscriber(model_name=model_name, device=device)
+    msg = f"Unsupported transcription backend: {backend}"
+    raise ValueError(msg)
+
+
+@dataclass(slots=True)
+class FasterWhisperTranscriber:
+    """CTranslate2 Whisper backend with beam search and word diagnostics."""
+
+    model_name: str = "openai/whisper-large-v3"
+    device: int | str | None = None
+    compute_type: str | None = None
+    _model: Any = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Load the converted Whisper model on the selected device."""
+        from faster_whisper import WhisperModel
+
+        target_device, device_index = _resolve_faster_whisper_device(self.device)
+        compute_type = self.compute_type
+        if compute_type is None:
+            compute_type = "float16" if target_device == "cuda" else "int8"
+        LOGGER.info(
+            "Loading faster-whisper on %s:%s with %s",
+            target_device,
+            device_index,
+            compute_type,
+        )
+        self._model = WhisperModel(
+            _faster_whisper_model_name(self.model_name),
+            device=target_device,
+            device_index=device_index,
+            compute_type=compute_type,
+        )
+
+    def transcribe_window(  # noqa: PLR0913
+        self,
+        audio_path: Path,
+        *,
+        language: str,
+        offset: float,
+        num_beams: int = 5,
+        prompt: str | None = None,
+        is_retry: bool = False,
+    ) -> list[TranscribedWord]:
+        """Transcribe a window with stable word timestamps and scores."""
+        temperatures: float | tuple[float, ...]
+        temperatures = (0.0, 0.2, 0.4, 0.6) if is_retry else 0.0
+        segments, _ = self._model.transcribe(
+            str(audio_path),
+            language=language,
+            task="transcribe",
+            beam_size=num_beams,
+            word_timestamps=True,
+            condition_on_previous_text=False,
+            initial_prompt=prompt,
+            temperature=temperatures,
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=-1.0,
+            no_speech_threshold=0.6,
+            vad_filter=False,
+        )
+        return _faster_segments_to_words(segments, offset=offset)
 
 
 @dataclass(slots=True)
@@ -99,15 +196,18 @@ class WhisperTranscriber:
             for word in words
         ]
 
-    def transcribe_window(
+    def transcribe_window(  # noqa: PLR0913
         self,
         audio_path: Path,
         *,
         language: str,
         offset: float,
         num_beams: int = 5,
+        prompt: str | None = None,
+        is_retry: bool = False,
     ) -> list[TranscribedWord]:
         """Transcribe one continuous acoustic window into timestamped words."""
+        del prompt, is_retry
         if not self._word_timestamps_supported:
             result = self._transcribe_with_segment_timestamps(
                 audio_path,
@@ -293,3 +393,106 @@ def _segment_chunks_to_words(
                 )
             )
     return words
+
+
+def _faster_segments_to_words(
+    segments: Any,
+    *,
+    offset: float,
+) -> list[TranscribedWord]:
+    """Convert faster-whisper segments and diagnostics to domain words."""
+    words: list[TranscribedWord] = []
+    for segment in segments:
+        average_log_probability = _optional_float(getattr(segment, "avg_logprob", None))
+        compression_ratio = _optional_float(getattr(segment, "compression_ratio", None))
+        no_speech_probability = _optional_float(
+            getattr(segment, "no_speech_prob", None)
+        )
+        segment_words = getattr(segment, "words", None)
+        if segment_words:
+            for word in segment_words:
+                text = str(getattr(word, "word", "")).strip()
+                start = _optional_float(getattr(word, "start", None))
+                end = _optional_float(getattr(word, "end", None))
+                if not text or start is None or end is None or end <= start:
+                    continue
+                words.append(
+                    TranscribedWord(
+                        start=start + offset,
+                        end=end + offset,
+                        text=text,
+                        confidence=_optional_float(getattr(word, "probability", None)),
+                        average_log_probability=average_log_probability,
+                        compression_ratio=compression_ratio,
+                        no_speech_probability=no_speech_probability,
+                    )
+                )
+            continue
+        words.extend(
+            _approximate_faster_segment_words(
+                segment,
+                offset=offset,
+                average_log_probability=average_log_probability,
+                compression_ratio=compression_ratio,
+                no_speech_probability=no_speech_probability,
+            )
+        )
+    return words
+
+
+def _approximate_faster_segment_words(
+    segment: Any,
+    *,
+    offset: float,
+    average_log_probability: float | None,
+    compression_ratio: float | None,
+    no_speech_probability: float | None,
+) -> list[TranscribedWord]:
+    """Distribute words when a backend segment lacks word alignment."""
+    tokens = str(getattr(segment, "text", "")).split()
+    start = _optional_float(getattr(segment, "start", None))
+    end = _optional_float(getattr(segment, "end", None))
+    if not tokens or start is None or end is None or end <= start:
+        return []
+    duration = (end - start) / len(tokens)
+    return [
+        TranscribedWord(
+            start=start + index * duration + offset,
+            end=start + (index + 1) * duration + offset,
+            text=token,
+            average_log_probability=average_log_probability,
+            compression_ratio=compression_ratio,
+            no_speech_probability=no_speech_probability,
+        )
+        for index, token in enumerate(tokens)
+    ]
+
+
+def _resolve_faster_whisper_device(
+    device: int | str | None,
+) -> tuple[str, int]:
+    if device is None:
+        import torch
+
+        return ("cuda", 0) if torch.cuda.is_available() else ("cpu", 0)
+    if isinstance(device, int):
+        return ("cpu", 0) if device < 0 else ("cuda", device)
+    normalized = device.lower()
+    if normalized == "cpu":
+        return "cpu", 0
+    if normalized.startswith("cuda"):
+        _, _, raw_index = normalized.partition(":")
+        return "cuda", int(raw_index) if raw_index else 0
+    msg = f"Unsupported faster-whisper device: {device}"
+    raise ValueError(msg)
+
+
+def _faster_whisper_model_name(model_name: str) -> str:
+    prefix = "openai/whisper-"
+    if model_name.startswith(prefix):
+        return model_name.removeprefix(prefix)
+    return model_name
+
+
+def _optional_float(value: Any) -> float | None:
+    return float(value) if value is not None else None

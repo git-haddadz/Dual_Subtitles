@@ -39,6 +39,12 @@ class TranscribedWord:
     text: str
     confidence: float | None = None
     speaker: str = "SPEAKER_00"
+    average_log_probability: float | None = None
+    compression_ratio: float | None = None
+    no_speech_probability: float | None = None
+    window_index: int | None = None
+    acoustic_start: float | None = None
+    acoustic_end: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

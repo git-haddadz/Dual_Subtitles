@@ -90,26 +90,38 @@ secondes par defaut, limitees a 30 secondes, avec une seconde de
 chevauchement. En l'absence d'un silence convenable, la limite temporelle
 cible sert de repli.
 
-`WhisperTranscriber` demande les timestamps de mots et utilise un faisceau de
-5 candidats. Chaque timestamp est converti dans le temps global de la video.
-Les occurrences issues des zones de chevauchement sont fusionnees seulement
-si leur texte et leurs positions temporelles correspondent. Une repetition
-reellement prononcee a un autre instant est conservee.
+`FasterWhisperTranscriber` est le backend par defaut. Il execute
+`faster-whisper` avec un faisceau de 5 candidats et conserve, pour chaque mot,
+sa probabilite ainsi que les diagnostics du segment: probabilite logarithmique
+moyenne, taux de compression et probabilite de non-parole. Le backend
+Transformers precedent reste disponible avec
+`--transcription-backend transformers`.
+
+Chaque timestamp est converti dans le temps global de la video. Les fenetres
+recoivent un court rappel textuel de la fenetre precedente, sauf apres une
+pause longue. Les occurrences des zones de chevauchement sont fusionnees par
+sequence, position et score acoustique. Une repetition reellement prononcee a
+un autre instant est conservee.
 
 ## 5. Controle Et Reprise Ciblee
 
 Apres la premiere transcription, le pipeline recherche les passages suspects:
 
 - confiance disponible inferieure au seuil configure;
+- probabilite logarithmique anormalement basse;
+- taux de compression anormalement eleve;
+- forte probabilite de non-parole;
+- duree de mot anormale;
 - timestamp invalide;
 - repetition rapprochee d'au moins trois occurrences;
 - mot refuse par un validateur lexical optionnel.
 
-Un passage suspect est retranscrit avec du contexte audio avant et apres. La
-nouvelle version remplace l'original uniquement si son score comparatif depasse
-le seuil d'amelioration. Sans preuve suffisante, le texte Whisper initial est
-conserve. Le validateur lexical constitue un signal de detection et ne corrige
-jamais directement un mot.
+Un passage suspect est retranscrit avec huit secondes de contexte audio de
+chaque cote, un faisceau plus large et plusieurs temperatures de repli. La
+nouvelle version remplace l'original uniquement si son score acoustique
+comparatif depasse le seuil d'amelioration. Sans preuve suffisante, le texte
+Whisper initial est conserve. Le validateur lexical constitue un signal de
+detection et ne corrige jamais directement un mot.
 
 ## 6. Diarisation Apres Transcription
 
@@ -137,10 +149,13 @@ sous-titres ni conserve par le package.
 `src/dual_subtitles/core/transcript.py` reconstruit les sous-titres depuis les
 mots horodates. Une nouvelle unite commence selon les silences, la ponctuation,
 le changement de locuteur, la duree maximale ou le nombre maximal de mots. Les
-timestamps invalides sont elimines et les sous-titres longs recoivent un retour
-a la ligne.
+timestamps de mots aberrants sont bornes sans perdre leurs valeurs acoustiques
+d'origine. Les fragments trop brefs sont fusionnes quand les limites de duree,
+de locuteur et de lisibilite le permettent. Les sous-titres restants recoivent
+une duree d'affichage minimale et les sous-titres longs un retour a la ligne.
 
-Sur CUDA, Whisper utilise `float16`. Sur CPU, il utilise `float32`.
+Sur CUDA, faster-whisper utilise `float16` par defaut. Sur CPU, il utilise
+`int8`. Le type de calcul reste configurable.
 
 La progression est journalisee segment par segment avec un pourcentage.
 

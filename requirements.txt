@@ -1,5 +1,7 @@
 accelerate==1.14.0
+ctranslate2==4.4.0
 deep-translator==1.11.4
+faster-whisper==1.2.1
 huggingface_hub==0.36.2
 moviepy==1.0.3
 numpy==1.26.4
