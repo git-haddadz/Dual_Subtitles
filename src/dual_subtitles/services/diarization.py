@@ -63,7 +63,21 @@ class PyannoteDiarizer:
 
     def detect(self, audio_path: Path) -> list[Segment]:
         """Detect speaker turns in an audio file."""
-        result = self._load_pipeline()(str(audio_path))
+        import soundfile as sf
+        import torch
+
+        audio, sample_rate = sf.read(
+            audio_path,
+            dtype="float32",
+            always_2d=True,
+        )
+        waveform = torch.from_numpy(audio.T.copy())
+        result = self._load_pipeline()(
+            {
+                "waveform": waveform,
+                "sample_rate": sample_rate,
+            }
+        )
         annotation = getattr(result, "speaker_diarization", result)
         segments: list[Segment] = []
         if hasattr(annotation, "itertracks"):

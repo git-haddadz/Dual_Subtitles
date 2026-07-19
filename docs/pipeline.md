@@ -58,7 +58,9 @@ meme lorsqu'une video echoue.
 
 `PyannoteDiarizer` charge `pyannote/speaker-diarization-community-1` avec
 `HUGGINGFACE_TOKEN`. La diarisation est terminee avant le premier chargement de
-Cohere. Chaque tour obtenu conserve son identifiant de locuteur.
+Cohere. Le WAV normalise est fourni directement comme tenseur afin de ne pas
+dependre du decodeur torchcodec de Colab. Chaque tour obtenu conserve son
+identifiant de locuteur.
 
 Sans diarisation, la video constitue un seul tour `SPEAKER_00`. Ce mode ne peut
 donc pas garantir qu'une unite ne contienne qu'un personnage.
