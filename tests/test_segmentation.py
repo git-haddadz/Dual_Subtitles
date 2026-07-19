@@ -40,6 +40,34 @@ def test_adjacent_turns_from_same_speaker_are_coalesced() -> None:
     assert units == [Segment(0.0, 4.0, "SPEAKER_00")]
 
 
+def test_untranscribable_micro_turn_does_not_split_the_main_speaker() -> None:
+    units = build_speaker_phrase_units(
+        [
+            Segment(0.0, 2.0, "SPEAKER_00"),
+            Segment(2.0, 2.05, "SPEAKER_01"),
+            Segment(2.05, 4.0, "SPEAKER_00"),
+        ],
+        [],
+        min_duration=0.5,
+        max_duration=12.0,
+        merge_gap=0.2,
+    )
+
+    assert units == [Segment(0.0, 4.0, "SPEAKER_00")]
+
+
+def test_short_but_transcribable_speaker_turn_is_preserved() -> None:
+    units = build_speaker_phrase_units(
+        [Segment(1.0, 1.25, "SPEAKER_01")],
+        [],
+        min_duration=0.5,
+        max_duration=12.0,
+        merge_gap=0.2,
+    )
+
+    assert units == [Segment(1.0, 1.25, "SPEAKER_01")]
+
+
 def test_long_recognized_text_is_split_inside_its_speaker_turn() -> None:
     subtitles = split_phrase_subtitle(
         SubtitleSegment(

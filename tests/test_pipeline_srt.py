@@ -113,8 +113,14 @@ def test_srt_serialization_preserves_phrase_boundaries() -> None:
 
 
 class RetryingTranscriber:
-    def __init__(self, retry_text: str) -> None:
+    def __init__(
+        self,
+        retry_text: str,
+        *,
+        initial_text: str = "�" * 60,
+    ) -> None:
         self.retry_text = retry_text
+        self.initial_text = initial_text
         self.attempts: list[bool] = []
 
     def transcribe_segment(
@@ -127,7 +133,7 @@ class RetryingTranscriber:
     ) -> SubtitleSegment:
         del language
         self.attempts.append(retry)
-        text = self.retry_text if retry else "�" * 60
+        text = self.retry_text if retry else self.initial_text
         return SubtitleSegment(segment.start, segment.end, text, segment.speaker)
 
 
@@ -159,3 +165,28 @@ def test_invalid_retry_is_discarded() -> None:
 
     assert transcriber.attempts == [False, True]
     assert result == []
+
+
+def test_truncated_arabic_ending_is_retried() -> None:
+    transcriber = RetryingTranscriber(
+        "لَنْ يَنْفَعَ إنْ لَمْ يَكُنْ مُطَهَّرًا.",
+        initial_text="لَنْ يَنْفَعَ إنْ لَمْ يَكُنْ م",
+    )
+
+    result = transcribe_phrase_units(
+        [Segment(6.13, 8.35, "SPEAKER_02")],
+        audio=FakeAudio(),
+        language="ar",
+        transcriber=transcriber,
+        temp_chunk=Path("phrase.wav"),
+    )
+
+    assert transcriber.attempts == [False, True]
+    assert result == [
+        SubtitleSegment(
+            6.13,
+            8.35,
+            "لَنْ يَنْفَعَ إنْ لَمْ يَكُنْ مُطَهَّرًا.",
+            "SPEAKER_02",
+        )
+    ]

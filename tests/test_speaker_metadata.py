@@ -15,6 +15,18 @@ def test_voice_profile_classification_is_cautious() -> None:
     assert _classify_f0(220.0)[0] == "feminine"
 
 
+def test_voice_profile_rejects_a_median_with_a_wide_pitch_distribution() -> None:
+    assert _classify_f0(220.0, q25_f0=140.0, q75_f0=260.0) == (
+        "unknown",
+        0.5,
+    )
+
+
+def test_voice_profile_uses_conservative_pitch_quartiles() -> None:
+    assert _classify_f0(220.0, q25_f0=210.0, q75_f0=235.0)[0] == "feminine"
+    assert _classify_f0(120.0, q25_f0=105.0, q75_f0=145.0)[0] == "masculine"
+
+
 def test_overlapping_different_speakers_are_excluded() -> None:
     isolated = Segment(3.0, 4.0, "SPEAKER_00")
 
@@ -50,11 +62,11 @@ def test_speaker_metadata_preserves_subtitle_association() -> None:
 
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert (
-            payload["profiles"]["SPEAKER_00"]["perceived_voice_gender"]
-            == "masculine"
+            payload["profiles"]["SPEAKER_00"]["perceived_voice_gender"] == "masculine"
         )
         assert payload["subtitles"] == [
             {"start": 1.1, "end": 2.9, "speaker": "SPEAKER_00"}
         ]
+        assert payload["schema_version"] == 2
     finally:
         path.unlink(missing_ok=True)

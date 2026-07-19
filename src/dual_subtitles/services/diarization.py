@@ -22,6 +22,7 @@ class PyannoteDiarizer:
     token_env_var: str = "HUGGINGFACE_TOKEN"
     device: int | str | None = None
     _pipeline: Any = field(init=False, repr=False, default=None)
+    _regular_turns: list[Segment] = field(init=False, repr=False, default_factory=list)
 
     def __post_init__(self) -> None:
         """Load the pyannote pipeline after validating the token."""
@@ -62,7 +63,7 @@ class PyannoteDiarizer:
         return torch.device(self.device)
 
     def detect(self, audio_path: Path) -> list[Segment]:
-        """Detect speaker turns in an audio file."""
+        """Return exclusive speaker turns suited to subtitle timestamps."""
         import soundfile as sf
         import torch
 
@@ -78,24 +79,40 @@ class PyannoteDiarizer:
                 "sample_rate": sample_rate,
             }
         )
-        annotation = getattr(result, "speaker_diarization", result)
-        segments: list[Segment] = []
-        if hasattr(annotation, "itertracks"):
-            tracks = (
-                (turn, speaker)
-                for turn, _, speaker in annotation.itertracks(yield_label=True)
+        regular_annotation = getattr(result, "speaker_diarization", result)
+        exclusive_annotation = getattr(
+            result,
+            "exclusive_speaker_diarization",
+            regular_annotation,
+        )
+        self._regular_turns = _segments_from_annotation(regular_annotation)
+        return _segments_from_annotation(exclusive_annotation)
+
+    @property
+    def regular_turns(self) -> list[Segment]:
+        """Return overlap-aware turns from the most recent detection."""
+        return list(self._regular_turns)
+
+
+def _segments_from_annotation(annotation: Any) -> list[Segment]:
+    """Convert a pyannote annotation or iterable into domain segments."""
+    segments: list[Segment] = []
+    if hasattr(annotation, "itertracks"):
+        tracks = (
+            (turn, speaker)
+            for turn, _, speaker in annotation.itertracks(yield_label=True)
+        )
+    else:
+        tracks = iter(annotation)
+    for turn, speaker in tracks:
+        segments.append(
+            Segment(
+                start=float(turn.start),
+                end=float(turn.end),
+                speaker=str(speaker),
             )
-        else:
-            tracks = iter(annotation)
-        for turn, speaker in tracks:
-            segments.append(
-                Segment(
-                    start=float(turn.start),
-                    end=float(turn.end),
-                    speaker=str(speaker),
-                )
-            )
-        return segments
+        )
+    return segments
 
 
 class SingleSpeakerDiarizer:

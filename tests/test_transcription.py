@@ -38,7 +38,29 @@ def test_normal_arabic_phrase_is_not_suspicious() -> None:
     assert reasons == ()
 
 
+def test_single_arabic_letter_at_end_is_suspicious() -> None:
+    reasons = suspicious_transcript_reasons(
+        "لَنْ يَنْفَعَ إنْ لَمْ يَكُنْ م",
+        duration=2.2,
+    )
+
+    assert "orphan-final-arabic-letter" in reasons
+
+
+def test_single_diacritized_arabic_letter_at_end_is_suspicious() -> None:
+    reasons = suspicious_transcript_reasons("تَ", duration=0.5)
+
+    assert "orphan-final-arabic-letter" in reasons
+
+
+def test_complete_short_arabic_interjection_is_not_suspicious() -> None:
+    reasons = suspicious_transcript_reasons("آه", duration=0.5)
+
+    assert reasons == ()
+
+
 def test_generation_limit_depends_on_audio_duration() -> None:
-    assert _generation_token_limit(2.0, configured_limit=256, retry=False) == 24
-    assert _generation_token_limit(2.0, configured_limit=256, retry=True) == 18
+    assert _generation_token_limit(0.5, configured_limit=256, retry=False) == 48
+    assert _generation_token_limit(2.0, configured_limit=256, retry=False) == 48
+    assert _generation_token_limit(2.0, configured_limit=256, retry=True) == 72
     assert _generation_token_limit(30.0, configured_limit=256, retry=False) == 256

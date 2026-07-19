@@ -16,6 +16,9 @@ LOGGER = logging.getLogger(__name__)
 MAX_REPEATED_CHARACTER_RUN = 12
 MAX_CHARACTERS_PER_SECOND = 40
 MAX_SINGLE_TOKEN_CHARACTERS = 48
+MIN_GENERATION_TOKENS = 48
+GENERATION_TOKENS_PER_SECOND = 24
+RETRY_TOKEN_MULTIPLIER = 1.5
 
 
 class SpeechTranscriber(Protocol):
@@ -166,10 +169,10 @@ def suspicious_transcript_reasons(text: str, *, duration: float) -> tuple[str, .
         reasons.append("invalid-unicode-surrogate")
     if re.search(rf"(.)\1{{{MAX_REPEATED_CHARACTER_RUN - 1},}}", stripped):
         reasons.append("repeated-character-run")
-    if any(
-        len(token) > MAX_SINGLE_TOKEN_CHARACTERS for token in stripped.split()
-    ):
+    if any(len(token) > MAX_SINGLE_TOKEN_CHARACTERS for token in stripped.split()):
         reasons.append("oversized-token")
+    if _has_orphan_final_arabic_letter(stripped):
+        reasons.append("orphan-final-arabic-letter")
     maximum_characters = max(
         MAX_SINGLE_TOKEN_CHARACTERS,
         math.ceil(max(duration, 0.2) * MAX_CHARACTERS_PER_SECOND),
@@ -179,6 +182,26 @@ def suspicious_transcript_reasons(text: str, *, duration: float) -> tuple[str, .
     return tuple(reasons)
 
 
+def _has_orphan_final_arabic_letter(text: str) -> bool:
+    """Detect a likely mid-word cutoff at the end of an Arabic transcript."""
+    if unicodedata.category(text[-1]).startswith("P"):
+        return False
+    final_token = text.rsplit(maxsplit=1)[-1]
+    letters = [
+        character
+        for character in final_token
+        if unicodedata.category(character).startswith("L")
+    ]
+    return (
+        len(letters) == 1
+        and "ARABIC" in unicodedata.name(letters[0], "")
+        and all(
+            character == letters[0] or unicodedata.category(character).startswith("M")
+            for character in final_token
+        )
+    )
+
+
 def _generation_token_limit(
     duration: float,
     *,
@@ -186,8 +209,10 @@ def _generation_token_limit(
     retry: bool,
 ) -> int:
     """Bound generation by acoustic duration to prevent runaway decoding."""
-    estimated = max(16, math.ceil(max(duration, 0.2) * 12))
-    limit = min(configured_limit, estimated)
+    estimated = max(
+        MIN_GENERATION_TOKENS,
+        math.ceil(max(duration, 0.2) * GENERATION_TOKENS_PER_SECOND),
+    )
     if retry:
-        limit = max(12, math.ceil(limit * 0.75))
-    return limit
+        estimated = math.ceil(estimated * RETRY_TOKEN_MULTIPLIER)
+    return min(configured_limit, estimated)

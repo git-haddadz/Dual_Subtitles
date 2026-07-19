@@ -18,12 +18,10 @@ def write_speaker_metadata(
 ) -> None:
     """Write voice profiles and timestamp-to-speaker associations as JSON."""
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "profiles": {
             profile.speaker: {
-                key: value
-                for key, value in asdict(profile).items()
-                if key != "speaker"
+                key: value for key, value in asdict(profile).items() if key != "speaker"
             }
             for profile in profiles
         },

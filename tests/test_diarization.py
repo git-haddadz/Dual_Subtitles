@@ -14,9 +14,16 @@ class FakeCommunityPipeline:
         self.audio_input = audio_input
         turns = [
             (SimpleNamespace(start=0.2, end=1.5), "SPEAKER_00"),
-            (SimpleNamespace(start=1.8, end=3.9), "SPEAKER_01"),
+            (SimpleNamespace(start=1.3, end=3.9), "SPEAKER_01"),
         ]
-        return SimpleNamespace(speaker_diarization=turns)
+        exclusive_turns = [
+            (SimpleNamespace(start=0.2, end=1.4), "SPEAKER_00"),
+            (SimpleNamespace(start=1.4, end=3.9), "SPEAKER_01"),
+        ]
+        return SimpleNamespace(
+            speaker_diarization=turns,
+            exclusive_speaker_diarization=exclusive_turns,
+        )
 
 
 def test_community_pipeline_output_is_converted_to_segments() -> None:
@@ -58,10 +65,28 @@ def test_community_pipeline_output_is_converted_to_segments() -> None:
             sys.modules["torch"] = original_torch
 
     assert segments == [
+        Segment(0.2, 1.4, "SPEAKER_00"),
+        Segment(1.4, 3.9, "SPEAKER_01"),
+    ]
+    assert diarizer.regular_turns == [
         Segment(0.2, 1.5, "SPEAKER_00"),
-        Segment(1.8, 3.9, "SPEAKER_01"),
+        Segment(1.3, 3.9, "SPEAKER_01"),
     ]
     assert pipeline.audio_input == {
         "waveform": [[0.1, 0.2]],
         "sample_rate": 16_000,
     }
+
+
+def test_legacy_annotation_is_used_when_exclusive_output_is_missing() -> None:
+    annotation = [
+        (SimpleNamespace(start=0.2, end=1.5), "SPEAKER_00"),
+        (SimpleNamespace(start=1.8, end=3.9), "SPEAKER_01"),
+    ]
+
+    from dual_subtitles.services.diarization import _segments_from_annotation
+
+    assert _segments_from_annotation(annotation) == [
+        Segment(0.2, 1.5, "SPEAKER_00"),
+        Segment(1.8, 3.9, "SPEAKER_01"),
+    ]

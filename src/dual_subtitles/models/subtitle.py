@@ -41,6 +41,9 @@ class SpeakerProfile:
     analyzed_duration: float
     analyzed_segments: int
     method: str = "librosa-pyin"
+    f0_q25_hz: float | None = None
+    f0_q75_hz: float | None = None
+    voiced_frame_ratio: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

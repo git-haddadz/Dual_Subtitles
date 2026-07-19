@@ -13,6 +13,7 @@ MIN_PROFILE_AUDIO_SECONDS = 2.0
 MASCULINE_F0_MAX_HZ = 155.0
 FEMININE_F0_MIN_HZ = 185.0
 MIN_VOICED_PROBABILITY = 0.5
+MIN_VOICED_FRAME_RATIO = 0.2
 
 
 def analyze_voice_profiles(
@@ -67,14 +68,25 @@ def analyze_voice_profiles(
         )
         if probabilities is None:
             probabilities = np.ones_like(f0)
-        reliable = f0[voiced & (probabilities >= MIN_VOICED_PROBABILITY)]
+        reliable = f0[
+            voiced & (probabilities >= MIN_VOICED_PROBABILITY) & np.isfinite(f0)
+        ]
         if reliable.size == 0:
             profiles.append(
                 _unknown_profile(speaker, selected_duration, selected_segments)
             )
             continue
         median_f0 = float(np.median(reliable))
-        label, confidence = _classify_f0(median_f0)
+        q25_f0, q75_f0 = (float(value) for value in np.percentile(reliable, [25, 75]))
+        voiced_frame_ratio = float(reliable.size / max(f0.size, 1))
+        label, confidence = _classify_f0(
+            median_f0,
+            q25_f0=q25_f0,
+            q75_f0=q75_f0,
+        )
+        confidence *= min(1.0, voiced_frame_ratio / 0.5)
+        if voiced_frame_ratio < MIN_VOICED_FRAME_RATIO:
+            label = "unknown"
         if confidence < minimum_confidence:
             label = "unknown"
         profiles.append(
@@ -85,6 +97,9 @@ def analyze_voice_profiles(
                 median_f0_hz=round(median_f0, 2),
                 analyzed_duration=round(selected_duration, 3),
                 analyzed_segments=selected_segments,
+                f0_q25_hz=round(q25_f0, 2),
+                f0_q75_hz=round(q75_f0, 2),
+                voiced_frame_ratio=round(voiced_frame_ratio, 4),
             )
         )
     return profiles
@@ -104,13 +119,20 @@ def _non_overlapping_turns(turns: list[Segment]) -> list[Segment]:
     ]
 
 
-def _classify_f0(median_f0: float) -> tuple[str, float]:
-    """Convert median fundamental frequency into a cautious voice label."""
-    if median_f0 <= MASCULINE_F0_MAX_HZ:
-        confidence = min(0.99, 0.7 + (MASCULINE_F0_MAX_HZ - median_f0) / 150)
+def _classify_f0(
+    median_f0: float,
+    *,
+    q25_f0: float | None = None,
+    q75_f0: float | None = None,
+) -> tuple[str, float]:
+    """Classify only when the central pitch distribution clears a boundary."""
+    lower_f0 = median_f0 if q25_f0 is None else q25_f0
+    upper_f0 = median_f0 if q75_f0 is None else q75_f0
+    if upper_f0 <= MASCULINE_F0_MAX_HZ:
+        confidence = min(0.99, 0.7 + (MASCULINE_F0_MAX_HZ - upper_f0) / 150)
         return "masculine", confidence
-    if median_f0 >= FEMININE_F0_MIN_HZ:
-        confidence = min(0.99, 0.7 + (median_f0 - FEMININE_F0_MIN_HZ) / 200)
+    if lower_f0 >= FEMININE_F0_MIN_HZ:
+        confidence = min(0.99, 0.7 + (lower_f0 - FEMININE_F0_MIN_HZ) / 200)
         return "feminine", confidence
     return "unknown", 0.5
 

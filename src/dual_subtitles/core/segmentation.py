@@ -8,6 +8,7 @@ from dataclasses import replace
 from dual_subtitles.models.subtitle import Segment, SubtitleSegment
 
 SENTENCE_ENDINGS = ("\u061f", "?", "!", ".", "\u060c", ",")
+MIN_TRANSCRIBABLE_TURN_DURATION = 0.2
 
 
 def build_speaker_phrase_units(
@@ -19,7 +20,10 @@ def build_speaker_phrase_units(
     merge_gap: float,
 ) -> list[Segment]:
     """Split speaker turns at acoustic pauses into ASR-sized phrase units."""
-    ordered = sorted(turns, key=lambda turn: (turn.start, turn.end))
+    ordered = sorted(
+        (turn for turn in turns if turn.duration >= MIN_TRANSCRIBABLE_TURN_DURATION),
+        key=lambda turn: (turn.start, turn.end),
+    )
     coalesced: list[Segment] = []
     for turn in ordered:
         if turn.duration <= 0:

@@ -9,6 +9,7 @@ from typing import Any
 
 from dual_subtitles.core.config import ProcessingConfig
 from dual_subtitles.core.segmentation import (
+    MIN_TRANSCRIBABLE_TURN_DURATION,
     add_line_breaks,
     build_speaker_phrase_units,
     split_phrase_subtitle,
@@ -32,7 +33,7 @@ from dual_subtitles.services.translation import InterlinearGoogleTranslator
 from dual_subtitles.services.voice_profile import analyze_voice_profiles
 
 LOGGER = logging.getLogger(__name__)
-MIN_TRANSCRIBABLE_DURATION = 0.2
+MIN_TRANSCRIBABLE_DURATION = MIN_TRANSCRIBABLE_TURN_DURATION
 VideoCompleteCallback = Callable[[Path, list[Path], Exception | None], None]
 
 
@@ -143,8 +144,7 @@ def process_video(  # noqa: PLR0912, PLR0915
             and _has_content(srt_path)
             and not _has_content(ass_path)
             and (
-                not config.analyze_voice_profiles
-                or _has_content(speaker_metadata_path)
+                not config.analyze_voice_profiles or _has_content(speaker_metadata_path)
             )
         ):
             if translator is None:
@@ -193,19 +193,30 @@ def process_video(  # noqa: PLR0912, PLR0915
             max_duration=config.max_speech_duration,
             merge_gap=config.merge_gap,
         )
+        ignored_micro_turns = sum(
+            turn.duration < MIN_TRANSCRIBABLE_TURN_DURATION for turn in speaker_turns
+        )
         LOGGER.info(
-            "Prepared %s speaker/phrase units from %s turns",
+            "Prepared %s speaker/phrase units from %s turns (%s micro-turns ignored)",
             len(phrase_units),
             len(speaker_turns),
+            ignored_micro_turns,
         )
 
         speaker_profiles: list[SpeakerProfile] = []
         if config.analyze_voice_profiles:
             LOGGER.info("Profiling perceived voices for later post-processing")
             try:
+                profile_turns = (
+                    diarizer.regular_turns
+                    if config.use_diarization
+                    and diarizer is not None
+                    and diarizer.regular_turns
+                    else speaker_turns
+                )
                 speaker_profiles = analyze_voice_profiles(
                     audio_path,
-                    speaker_turns,
+                    profile_turns,
                     maximum_seconds=config.voice_profile_max_seconds,
                     minimum_confidence=config.voice_profile_min_confidence,
                 )
