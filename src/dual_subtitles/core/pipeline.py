@@ -19,11 +19,17 @@ from dual_subtitles.io.audio import (
     load_audio,
     normalize_audio,
 )
+from dual_subtitles.io.speaker_metadata import write_speaker_metadata
 from dual_subtitles.io.subtitle_files import parse_srt, write_ass, write_srt
-from dual_subtitles.models.subtitle import Segment, SubtitleSegment
+from dual_subtitles.models.subtitle import Segment, SpeakerProfile, SubtitleSegment
 from dual_subtitles.services.diarization import PyannoteDiarizer, SingleSpeakerDiarizer
-from dual_subtitles.services.transcription import SpeechTranscriber, create_transcriber
+from dual_subtitles.services.transcription import (
+    SpeechTranscriber,
+    create_transcriber,
+    suspicious_transcript_reasons,
+)
 from dual_subtitles.services.translation import InterlinearGoogleTranslator
+from dual_subtitles.services.voice_profile import analyze_voice_profiles
 
 LOGGER = logging.getLogger(__name__)
 MIN_TRANSCRIBABLE_DURATION = 0.2
@@ -117,11 +123,13 @@ def process_video(  # noqa: PLR0912, PLR0915
 ) -> list[Path]:
     """Process one video with diarization before phrase-level recognition."""
     srt_path, ass_path = _subtitle_paths(video_path, config.output_dir)
+    speaker_metadata_path = _speaker_metadata_path(video_path, config.output_dir)
     requested_paths = [
         path
         for enabled, path in (
             (config.generate_srt, srt_path),
             (config.generate_ass, ass_path),
+            (config.analyze_voice_profiles, speaker_metadata_path),
         )
         if enabled
     ]
@@ -134,6 +142,10 @@ def process_video(  # noqa: PLR0912, PLR0915
             config.generate_ass
             and _has_content(srt_path)
             and not _has_content(ass_path)
+            and (
+                not config.analyze_voice_profiles
+                or _has_content(speaker_metadata_path)
+            )
         ):
             if translator is None:
                 msg = "ASS generation requires a translator."
@@ -187,6 +199,19 @@ def process_video(  # noqa: PLR0912, PLR0915
             len(speaker_turns),
         )
 
+        speaker_profiles: list[SpeakerProfile] = []
+        if config.analyze_voice_profiles:
+            LOGGER.info("Profiling perceived voices for later post-processing")
+            try:
+                speaker_profiles = analyze_voice_profiles(
+                    audio_path,
+                    speaker_turns,
+                    maximum_seconds=config.voice_profile_max_seconds,
+                    minimum_confidence=config.voice_profile_min_confidence,
+                )
+            except Exception:  # noqa: BLE001 - optional metadata must not block SRT.
+                LOGGER.exception("Voice profiling failed; transcription will continue")
+
         LOGGER.info("Step 5/7 - Transcribing phrase units with Cohere Arabic")
         recognized = transcribe_phrase_units(
             phrase_units,
@@ -212,6 +237,15 @@ def process_video(  # noqa: PLR0912, PLR0915
             write_ass(ass_path, subtitles, translator)
             generated.append(ass_path)
             LOGGER.info("ASS ready: %s", ass_path)
+        if config.analyze_voice_profiles:
+            write_speaker_metadata(
+                speaker_metadata_path,
+                profiles=speaker_profiles,
+                turns=speaker_turns,
+                subtitles=subtitles,
+            )
+            generated.append(speaker_metadata_path)
+            LOGGER.info("Speaker metadata ready: %s", speaker_metadata_path)
         return generated
     finally:
         audio_path.unlink(missing_ok=True)
@@ -249,8 +283,43 @@ def transcribe_phrase_units(
             unit,
             language=language,
         )
-        if result is not None:
-            recognized.append(result)
+        if result is None:
+            continue
+        reasons = suspicious_transcript_reasons(
+            result.text,
+            duration=unit.duration,
+        )
+        if reasons:
+            LOGGER.warning(
+                "Suspicious ASR output at %.2fs-%.2fs (%s); retrying",
+                unit.start,
+                unit.end,
+                ", ".join(reasons),
+            )
+            retry = transcriber.transcribe_segment(
+                temp_chunk,
+                unit,
+                language=language,
+                retry=True,
+            )
+            retry_reasons = (
+                ("empty",)
+                if retry is None
+                else suspicious_transcript_reasons(
+                    retry.text,
+                    duration=unit.duration,
+                )
+            )
+            if retry is None or retry_reasons:
+                LOGGER.warning(
+                    "Discarding invalid ASR output at %.2fs-%.2fs after retry (%s)",
+                    unit.start,
+                    unit.end,
+                    ", ".join(retry_reasons),
+                )
+                continue
+            result = retry
+        recognized.append(result)
     return recognized
 
 
@@ -278,6 +347,10 @@ def _subtitle_paths(video_path: Path, output_dir: Path) -> tuple[Path, Path]:
     return output_base.with_suffix(".srt"), output_base.with_suffix(".ass")
 
 
+def _speaker_metadata_path(video_path: Path, output_dir: Path) -> Path:
+    return output_dir / f"{video_path.stem}.speakers.json"
+
+
 def _has_content(path: Path) -> bool:
     return path.is_file() and path.stat().st_size > 0
 
@@ -287,6 +360,10 @@ def _needs_transcription(video_path: Path, config: ProcessingConfig) -> bool:
         return True
     srt_path, ass_path = _subtitle_paths(video_path, config.output_dir)
     if config.generate_srt and not _has_content(srt_path):
+        return True
+    if config.analyze_voice_profiles and not _has_content(
+        _speaker_metadata_path(video_path, config.output_dir)
+    ):
         return True
     return (
         config.generate_ass
@@ -301,4 +378,8 @@ def _needs_translation(video_path: Path, config: ProcessingConfig) -> bool:
     if not config.skip_existing:
         return True
     _, ass_path = _subtitle_paths(video_path, config.output_dir)
-    return not _has_content(ass_path)
+    if not _has_content(ass_path):
+        return True
+    return config.analyze_voice_profiles and not _has_content(
+        _speaker_metadata_path(video_path, config.output_dir)
+    )

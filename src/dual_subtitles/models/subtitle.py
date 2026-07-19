@@ -31,6 +31,19 @@ class SubtitleSegment:
 
 
 @dataclass(frozen=True, slots=True)
+class SpeakerProfile:
+    """Acoustic profile inferred from several clean turns of one speaker."""
+
+    speaker: str
+    perceived_voice_gender: str
+    confidence: float
+    median_f0_hz: float | None
+    analyzed_duration: float
+    analyzed_segments: int
+    method: str = "librosa-pyin"
+
+
+@dataclass(frozen=True, slots=True)
 class TranscribedWord:
     """A word emitted by the speech recognizer with global timestamps."""
 

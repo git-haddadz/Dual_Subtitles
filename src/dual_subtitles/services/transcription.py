@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import math
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -10,6 +13,9 @@ from typing import Any, Protocol
 from dual_subtitles.models.subtitle import Segment, SubtitleSegment
 
 LOGGER = logging.getLogger(__name__)
+MAX_REPEATED_CHARACTER_RUN = 12
+MAX_CHARACTERS_PER_SECOND = 40
+MAX_SINGLE_TOKEN_CHARACTERS = 48
 
 
 class SpeechTranscriber(Protocol):
@@ -21,6 +27,7 @@ class SpeechTranscriber(Protocol):
         segment: Segment,
         *,
         language: str,
+        retry: bool = False,
     ) -> SubtitleSegment | None:
         """Transcribe one already-isolated speaker/phrase unit."""
         ...
@@ -73,6 +80,7 @@ class CohereArabicTranscriber:
         segment: Segment,
         *,
         language: str,
+        retry: bool = False,
     ) -> SubtitleSegment | None:
         """Transcribe one unit and retain its acoustic boundaries unchanged."""
         import soundfile as sf
@@ -92,9 +100,24 @@ class CohereArabicTranscriber:
         )
         inputs = inputs.to(self._torch_device, dtype=self._model.dtype)
         with torch.inference_mode():
+            token_limit = _generation_token_limit(
+                segment.duration,
+                configured_limit=self.max_new_tokens,
+                retry=retry,
+            )
+            generation_options: dict[str, Any] = {
+                "max_new_tokens": token_limit,
+            }
+            if retry:
+                generation_options.update(
+                    {
+                        "no_repeat_ngram_size": 4,
+                        "repetition_penalty": 1.15,
+                    }
+                )
             output_ids = self._model.generate(
                 **inputs,
-                max_new_tokens=self.max_new_tokens,
+                **generation_options,
             )
         decoded = self._processor.decode(
             output_ids,
@@ -129,3 +152,42 @@ def _decoded_text(decoded: Any) -> str:
     if isinstance(decoded, list):
         return str(decoded[0]).strip() if decoded else ""
     return str(decoded).strip() if decoded is not None else ""
+
+
+def suspicious_transcript_reasons(text: str, *, duration: float) -> tuple[str, ...]:
+    """Return generic reasons why an ASR result must not reach the SRT."""
+    stripped = text.strip()
+    reasons: list[str] = []
+    if not stripped:
+        return ("empty",)
+    if "\ufffd" in stripped:
+        reasons.append("replacement-character")
+    if any(unicodedata.category(character) == "Cs" for character in stripped):
+        reasons.append("invalid-unicode-surrogate")
+    if re.search(rf"(.)\1{{{MAX_REPEATED_CHARACTER_RUN - 1},}}", stripped):
+        reasons.append("repeated-character-run")
+    if any(
+        len(token) > MAX_SINGLE_TOKEN_CHARACTERS for token in stripped.split()
+    ):
+        reasons.append("oversized-token")
+    maximum_characters = max(
+        MAX_SINGLE_TOKEN_CHARACTERS,
+        math.ceil(max(duration, 0.2) * MAX_CHARACTERS_PER_SECOND),
+    )
+    if len(stripped) > maximum_characters:
+        reasons.append("text-too-long-for-audio")
+    return tuple(reasons)
+
+
+def _generation_token_limit(
+    duration: float,
+    *,
+    configured_limit: int,
+    retry: bool,
+) -> int:
+    """Bound generation by acoustic duration to prevent runaway decoding."""
+    estimated = max(16, math.ceil(max(duration, 0.2) * 12))
+    limit = min(configured_limit, estimated)
+    if retry:
+        limit = max(12, math.ceil(limit * 0.75))
+    return limit

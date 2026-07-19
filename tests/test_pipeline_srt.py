@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from dual_subtitles.core.config import ProcessingConfig
-from dual_subtitles.core.pipeline import process_video
+from dual_subtitles.core.pipeline import process_video, transcribe_phrase_units
 from dual_subtitles.io.subtitle_files import build_srt
 from dual_subtitles.models.subtitle import Segment, SubtitleSegment
 
@@ -30,8 +30,9 @@ class RecordingTranscriber:
         segment: Segment,
         *,
         language: str,
+        retry: bool = False,
     ) -> SubtitleSegment:
-        del language
+        del language, retry
         self.calls.append("transcription")
         return SubtitleSegment(
             segment.start,
@@ -60,6 +61,7 @@ def test_process_video_diarizes_before_phrase_transcription(
         output_dir=Path("output"),
         temp_dir=Path("temp"),
         generate_ass=False,
+        analyze_voice_profiles=False,
     )
     monkeypatch.setattr(
         "dual_subtitles.core.pipeline.extract_audio",
@@ -108,3 +110,52 @@ def test_srt_serialization_preserves_phrase_boundaries() -> None:
     )
 
     assert content == "1\n00:00:01,250 --> 00:00:03,500\nمرحبا بكم\n"
+
+
+class RetryingTranscriber:
+    def __init__(self, retry_text: str) -> None:
+        self.retry_text = retry_text
+        self.attempts: list[bool] = []
+
+    def transcribe_segment(
+        self,
+        _path: Path,
+        segment: Segment,
+        *,
+        language: str,
+        retry: bool = False,
+    ) -> SubtitleSegment:
+        del language
+        self.attempts.append(retry)
+        text = self.retry_text if retry else "�" * 60
+        return SubtitleSegment(segment.start, segment.end, text, segment.speaker)
+
+
+def test_suspicious_transcription_is_retried() -> None:
+    transcriber = RetryingTranscriber("النص الصحيح")
+
+    result = transcribe_phrase_units(
+        [Segment(1.0, 3.0, "SPEAKER_02")],
+        audio=FakeAudio(),
+        language="ar",
+        transcriber=transcriber,
+        temp_chunk=Path("phrase.wav"),
+    )
+
+    assert transcriber.attempts == [False, True]
+    assert result == [SubtitleSegment(1.0, 3.0, "النص الصحيح", "SPEAKER_02")]
+
+
+def test_invalid_retry_is_discarded() -> None:
+    transcriber = RetryingTranscriber("ه" * 100)
+
+    result = transcribe_phrase_units(
+        [Segment(1.0, 2.0, "SPEAKER_02")],
+        audio=FakeAudio(),
+        language="ar",
+        transcriber=transcriber,
+        temp_chunk=Path("phrase.wav"),
+    )
+
+    assert transcriber.attempts == [False, True]
+    assert result == []

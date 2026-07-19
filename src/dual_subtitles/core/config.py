@@ -25,6 +25,9 @@ class ProcessingConfig:
     silence_threshold_offset: float = 16.0
     max_words_per_subtitle: int = 8
     line_break_words: int = 6
+    analyze_voice_profiles: bool = True
+    voice_profile_max_seconds: float = 30.0
+    voice_profile_min_confidence: float = 0.7
     generate_srt: bool = True
     generate_ass: bool = True
     skip_existing: bool = True
@@ -44,6 +47,7 @@ class ProcessingConfig:
             "max_words_per_subtitle": self.max_words_per_subtitle,
             "line_break_words": self.line_break_words,
             "silence_min_duration": self.silence_min_duration,
+            "voice_profile_max_seconds": self.voice_profile_max_seconds,
         }
         for name, value in positive_values.items():
             if value <= 0:
@@ -53,11 +57,16 @@ class ProcessingConfig:
         non_negative_values = {
             "merge_gap": self.merge_gap,
             "silence_threshold_offset": self.silence_threshold_offset,
+            "voice_profile_min_confidence": self.voice_profile_min_confidence,
         }
         for name, value in non_negative_values.items():
             if value < 0:
                 msg = f"{name} must be zero or greater."
                 raise ValueError(msg)
+
+        if self.voice_profile_min_confidence > 1:
+            msg = "voice_profile_min_confidence must not be greater than one."
+            raise ValueError(msg)
 
         if not self.normalized_extension().strip("."):
             msg = "video_extension must contain a file extension."

@@ -9,17 +9,21 @@ La langue cible des glosses reste configurable.
 Video MP4
   -> extraction et normalisation audio
   -> diarisation pyannote
+  -> profil vocal prudent par locuteur
   -> decoupage de chaque locuteur sur les pauses acoustiques
   -> transcription locale Cohere Arabic par phrase/locuteur
+  -> validation et seconde passe des sorties suspectes
   -> segmentation de lisibilite sans franchir un locuteur
   -> ecriture SRT
+  -> ecriture des metadonnees locuteur JSON
   -> traduction Google mot a mot
   -> rendu ASS interlineaire
 ```
 
-Whisper, les fenetres chevauchantes de 30 secondes, la fusion de mots et les
-reprises acoustiques ont ete retires de cette branche. Un seul modele determine
-le texte transcrit: `CohereLabs/cohere-transcribe-arabic-07-2026`.
+Whisper, les fenetres chevauchantes de 30 secondes et la fusion de mots ont ete
+retires de cette branche. Un seul modele determine le texte transcrit, y compris
+lors d'une seconde passe ciblee:
+`CohereLabs/cohere-transcribe-arabic-07-2026`.
 
 ## 1. Configuration
 
@@ -31,6 +35,7 @@ le texte transcrit: `CohereLabs/cohere-transcribe-arabic-07-2026`.
 - les durees minimale et maximale d'une unite de parole;
 - le seuil de pause utilise pour approcher les limites de phrase;
 - le nombre maximal de mots affiche dans un sous-titre;
+- l'activation, la duree d'analyse et le seuil des profils vocaux;
 - les sorties SRT et ASS, la diarisation et le peripherique d'execution.
 
 Le modele Cohere de cette branche est specialise pour l'arabe et l'anglais. La
@@ -48,6 +53,10 @@ Lorsque `skip_existing` est active:
 - un SRT existant peut servir a regenerer uniquement l'ASS;
 - aucun modele de transcription n'est charge si le SRT est reutilisable.
 
+Lorsque les profils vocaux sont actives, le fichier `.speakers.json` fait aussi
+partie des sorties attendues. Son absence provoque une nouvelle analyse audio
+afin de ne pas fabriquer ces metadonnees depuis le texte.
+
 ## 3. Audio
 
 ffmpeg extrait la premiere piste audio. pydub la convertit en WAV mono 16 kHz,
@@ -64,6 +73,18 @@ identifiant de locuteur.
 
 Sans diarisation, la video constitue un seul tour `SPEAKER_00`. Ce mode ne peut
 donc pas garantir qu'une unite ne contienne qu'un personnage.
+
+### Profil Vocal Conserve Pour Le Post-traitement
+
+Plusieurs tours propres et non chevauches de chaque locuteur sont analyses avec
+une estimation locale de la frequence fondamentale. Le resultat est stocke sous
+`perceived_voice_gender` avec une confiance, la frequence mediane et la quantite
+d'audio analysee. Une zone acoustique ambigue produit `unknown`.
+
+Cette estimation n'est ni une identite biologique ni une correction du texte.
+Elle n'influence actuellement pas Cohere; elle est seulement conservee dans
+`<video>.speakers.json` pour une future validation morphologique et
+contextuelle.
 
 ## 5. Unites Locuteur/Phrase
 
@@ -94,6 +115,13 @@ egalement a pyannote; les notebooks renseignent `HF_TOKEN` et
 
 Cohere et pyannote utilisent CUDA lorsqu'un GPU est selectionne. Cohere est
 charge en `float16` sur GPU et en `float32` sur CPU.
+
+Le nombre maximal de tokens generes est adapte a la duree de chaque unite. Une
+sortie contenant un caractere Unicode de remplacement, une repetition massive,
+un token demesure ou trop de texte pour l'audio est consideree comme suspecte.
+Cohere effectue alors une seconde passe plus restrictive. Si celle-ci reste
+invalide, le passage est omis et consigne dans les logs au lieu de contaminer le
+SRT avec une hallucination.
 
 ## 7. Construction Du SRT
 
@@ -141,13 +169,15 @@ src/dual_subtitles/
 |   `-- segmentation.py
 |-- io/
 |   |-- audio.py
+|   |-- speaker_metadata.py
 |   `-- subtitle_files.py
 |-- models/
 |   `-- subtitle.py
 `-- services/
     |-- diarization.py
     |-- transcription.py
-    `-- translation.py
+    |-- translation.py
+    `-- voice_profile.py
 ```
 
 Controles locaux:

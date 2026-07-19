@@ -47,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--no-ass", action="store_true")
     process.add_argument("--no-skip-existing", action="store_true")
     process.add_argument("--no-diarization", action="store_true")
+    process.add_argument("--no-voice-profiles", action="store_true")
     process.add_argument("-v", "--verbose", action="store_true")
     return parser
 
@@ -92,6 +93,7 @@ def _process(args: argparse.Namespace, temp_dir: Path) -> int:
         generate_ass=not args.no_ass,
         skip_existing=not args.no_skip_existing,
         use_diarization=not args.no_diarization,
+        analyze_voice_profiles=not args.no_voice_profiles,
         video_extension=args.extension,
         device=_parse_device(args.device),
     )
