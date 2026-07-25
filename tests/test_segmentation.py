@@ -86,3 +86,37 @@ def test_long_recognized_text_is_split_inside_its_speaker_turn() -> None:
     assert all(subtitle.speaker == "SPEAKER_02" for subtitle in subtitles)
     assert subtitles[0].start == 10.0
     assert subtitles[-1].end == 14.0
+
+
+def test_phrase_split_balances_a_short_final_group() -> None:
+    subtitles = split_phrase_subtitle(
+        SubtitleSegment(
+            10.0,
+            11.5,
+            "one two three four five six seven eight nine ten",
+            "SPEAKER_02",
+        ),
+        max_words=8,
+        min_duration=0.7,
+    )
+
+    assert [subtitle.text for subtitle in subtitles] == [
+        "one two three four five",
+        "six seven eight nine ten",
+    ]
+    assert all(subtitle.end - subtitle.start >= 0.7 for subtitle in subtitles)
+
+
+def test_phrase_split_does_not_create_unreadable_micro_cues() -> None:
+    subtitle = SubtitleSegment(
+        10.0,
+        10.22,
+        "one two three four five six seven eight nine ten eleven twelve",
+        "SPEAKER_02",
+    )
+
+    assert split_phrase_subtitle(
+        subtitle,
+        max_words=8,
+        min_duration=0.7,
+    ) == [subtitle]

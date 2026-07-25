@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from dataclasses import replace
 
@@ -66,6 +67,7 @@ def split_phrase_subtitle(
     subtitle: SubtitleSegment,
     *,
     max_words: int,
+    min_duration: float = 0.0,
 ) -> list[SubtitleSegment]:
     """Split a long recognized turn without crossing its speaker boundary."""
     words = subtitle.text.split()
@@ -85,6 +87,19 @@ def split_phrase_subtitle(
 
     total_weight = sum(len(group) for group in groups)
     duration = subtitle.end - subtitle.start
+    if min_duration > 0 and any(
+        duration * len(group) / total_weight < min_duration for group in groups
+    ):
+        groups = _balanced_groups_with_minimum_duration(
+            words,
+            duration=duration,
+            max_words=max_words,
+            min_duration=min_duration,
+        )
+        if len(groups) == 1:
+            return [subtitle]
+        total_weight = len(words)
+
     cursor = subtitle.start
     result: list[SubtitleSegment] = []
     for index, group in enumerate(groups):
@@ -102,6 +117,32 @@ def split_phrase_subtitle(
         )
         cursor = end
     return result
+
+
+def _balanced_groups_with_minimum_duration(
+    words: list[str],
+    *,
+    duration: float,
+    max_words: int,
+    min_duration: float,
+) -> list[list[str]]:
+    """Balance text only when the normal split would create unreadable cues."""
+    required_groups = math.ceil(len(words) / max_words)
+    for group_count in range(required_groups, 1, -1):
+        base_size, larger_groups = divmod(len(words), group_count)
+        sizes = [
+            base_size + (1 if index < larger_groups else 0)
+            for index in range(group_count)
+        ]
+        if duration * min(sizes) / len(words) < min_duration:
+            continue
+        groups: list[list[str]] = []
+        cursor = 0
+        for size in sizes:
+            groups.append(words[cursor : cursor + size])
+            cursor += size
+        return groups
+    return [words]
 
 
 def _merge_short_phrase_units(

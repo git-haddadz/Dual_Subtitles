@@ -31,8 +31,9 @@ class RecordingTranscriber:
         *,
         language: str,
         retry: bool = False,
+        retry_reasons: tuple[str, ...] = (),
     ) -> SubtitleSegment:
-        del language, retry
+        del language, retry, retry_reasons
         self.calls.append("transcription")
         return SubtitleSegment(
             segment.start,
@@ -117,11 +118,12 @@ class RetryingTranscriber:
         self,
         retry_text: str,
         *,
-        initial_text: str = "�" * 60,
+        initial_text: str = "نص � تالف",
     ) -> None:
         self.retry_text = retry_text
         self.initial_text = initial_text
         self.attempts: list[bool] = []
+        self.retry_reasons: list[tuple[str, ...]] = []
 
     def transcribe_segment(
         self,
@@ -130,9 +132,11 @@ class RetryingTranscriber:
         *,
         language: str,
         retry: bool = False,
+        retry_reasons: tuple[str, ...] = (),
     ) -> SubtitleSegment:
         del language
         self.attempts.append(retry)
+        self.retry_reasons.append(retry_reasons)
         text = self.retry_text if retry else self.initial_text
         return SubtitleSegment(segment.start, segment.end, text, segment.speaker)
 
@@ -187,6 +191,73 @@ def test_truncated_arabic_ending_is_retried() -> None:
             6.13,
             8.35,
             "لَنْ يَنْفَعَ إنْ لَمْ يَكُنْ مُطَهَّرًا.",
+            "SPEAKER_02",
+        )
+    ]
+
+
+def test_non_speech_marker_is_discarded_without_retry() -> None:
+    transcriber = RetryingTranscriber(
+        "نص مختلق",
+        initial_text="@@@فراغ",
+    )
+
+    result = transcribe_phrase_units(
+        [Segment(1.0, 2.0, "SPEAKER_02")],
+        audio=FakeAudio(),
+        language="ar",
+        transcriber=transcriber,
+        temp_chunk=Path("phrase.wav"),
+    )
+
+    assert transcriber.attempts == [False]
+    assert result == []
+
+
+def test_repeated_words_are_retried() -> None:
+    transcriber = RetryingTranscriber(
+        "هذا هو النص الصحيح.",
+        initial_text="بس بس بس بس بس بس بس بس",
+    )
+
+    result = transcribe_phrase_units(
+        [Segment(1.0, 2.0, "SPEAKER_02")],
+        audio=FakeAudio(),
+        language="ar",
+        transcriber=transcriber,
+        temp_chunk=Path("phrase.wav"),
+    )
+
+    assert transcriber.attempts == [False, True]
+    assert "repeated-token-run" in transcriber.retry_reasons[1]
+    assert result == [
+        SubtitleSegment(
+            1.0,
+            2.0,
+            "هذا هو النص الصحيح.",
+            "SPEAKER_02",
+        )
+    ]
+
+
+def test_repeated_words_are_collapsed_when_retry_still_repeats() -> None:
+    repeated = " ".join(["بس"] * 12)
+    transcriber = RetryingTranscriber(repeated, initial_text=repeated)
+
+    result = transcribe_phrase_units(
+        [Segment(1.0, 1.22, "SPEAKER_02")],
+        audio=FakeAudio(),
+        language="ar",
+        transcriber=transcriber,
+        temp_chunk=Path("phrase.wav"),
+    )
+
+    assert transcriber.attempts == [False, True]
+    assert result == [
+        SubtitleSegment(
+            1.0,
+            1.22,
+            "بس بس بس",
             "SPEAKER_02",
         )
     ]

@@ -23,7 +23,7 @@ Video MP4
 Whisper, les fenetres chevauchantes de 30 secondes et la fusion de mots ont ete
 retires de cette branche. Un seul modele determine le texte transcrit, y compris
 lors d'une seconde passe ciblee:
-`CohereLabs/cohere-transcribe-arabic-07-2026`.
+[`CohereLabs/cohere-transcribe-arabic-07-2026`](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026).
 
 ## 1. Configuration
 
@@ -38,8 +38,10 @@ lors d'une seconde passe ciblee:
 - l'activation, la duree d'analyse et le seuil des profils vocaux;
 - les sorties SRT et ASS, la diarisation et le peripherique d'execution.
 
-Le modele Cohere de cette branche est specialise pour l'arabe et l'anglais. La
-configuration par defaut utilise l'arabe comme langue de transcription.
+Le modele Cohere de cette branche est specialise pour l'arabe et l'anglais,
+y compris la parole arabe-anglaise code-switched. La configuration par defaut
+utilise l'arabe comme langue principale de transcription; le latin reste donc
+un script valide dans sa sortie.
 
 ## 2. Traitement Par Lot Et Reprise
 
@@ -65,15 +67,24 @@ meme lorsqu'une video echoue.
 
 ## 4. Diarisation Avant Transcription
 
-`PyannoteDiarizer` charge `pyannote/speaker-diarization-community-1` avec
-`HUGGINGFACE_TOKEN`. La diarisation est terminee avant le premier chargement de
-Cohere. Le WAV normalise est fourni directement comme tenseur afin de ne pas
-dependre du decodeur torchcodec de Colab. La diarisation exclusive de
-`community-1` fournit les frontieres utilisees par Cohere et evite de produire
-deux sous-titres concurrents pendant une parole superposee. La diarisation
-reguliere, qui conserve les chevauchements, reste utilisee pour exclure les
-passages melanges de l'analyse des profils vocaux. Chaque tour conserve son
-identifiant de locuteur.
+`PyannoteDiarizer` charge
+[`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1)
+avec `HUGGINGFACE_TOKEN`. La diarisation est terminee avant le premier
+chargement de Cohere. Le WAV normalise est fourni directement comme tenseur
+afin de ne pas dependre du decodeur torchcodec de Colab. La diarisation
+exclusive de `community-1` fournit les frontieres utilisees par Cohere et evite
+de produire deux sous-titres concurrents pendant une parole superposee. La
+diarisation reguliere, qui conserve les chevauchements, reste utilisee pour
+exclure les passages melanges de l'analyse des profils vocaux. Chaque tour
+conserve son identifiant de locuteur.
+
+Cette selection de zones vocales joue aussi le role d'un premier garde-fou
+contre le non-speech. C'est important car la
+[fiche officielle de Cohere](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026#strengths-and-limitations)
+indique que ce type de modele autoregressif tend a transcrire le silence et les
+bruits, et recommande un VAD ou un noise gate en amont. La diarisation ne
+constitue toutefois pas un classifieur musique/chant: une voix chantee peut
+encore etre consideree comme de la parole.
 
 Sans diarisation, la video constitue un seul tour `SPEAKER_00`. Ce mode ne peut
 donc pas garantir qu'une unite ne contienne qu'un personnage.
@@ -126,14 +137,47 @@ egalement a pyannote; les notebooks renseignent `HF_TOKEN` et
 Cohere et pyannote utilisent CUDA lorsqu'un GPU est selectionne. Cohere est
 charge en `float16` sur GPU et en `float32` sur CPU.
 
-Le nombre maximal de tokens generes est adapte a la duree de chaque unite, avec
-un plancher qui laisse assez de marge a la tokenisation arabe et aux diacritiques.
-Une sortie contenant un caractere Unicode de remplacement, une repetition
-massive, un token demesure, une fin arabe manifestement tronquee ou trop de texte
-pour l'audio est consideree comme suspecte. Cohere effectue alors une seconde
-passe avec des contraintes anti-repetition et un budget de securite plus large.
-Si celle-ci reste invalide, le passage est omis et consigne dans les logs au lieu
-de contaminer le SRT avec une hallucination.
+La generation utilise le plafond officiel fixe de `256` nouveaux tokens. Ce
+plafond n'est plus reduit en fonction de la duree: une chaine arabe courte mais
+fortement diacritee peut demander beaucoup de tokens et ne doit pas etre coupee
+artificiellement.
+
+La validation distingue les sorties terminales des anomalies qui peuvent
+beneficier d'une seconde passe:
+
+- un marqueur interne contenant `@@@`, une sortie sans aucune lettre ni
+  aucun chiffre, ou des lettres appartenant a un script autre que l'arabe et le
+  latin sont omis sans retry;
+- un caractere Unicode de remplacement, une repetition massive, un token
+  demesure, une fin arabe manifestement tronquee ou une densite textuelle
+  invraisemblable declenchent une nouvelle generation;
+- les contraintes anti-repetition ne sont activees que lorsque la premiere
+  sortie contient effectivement une repetition, afin de ne pas deformer une
+  phrase suspecte pour une autre raison;
+- si une longue repetition persiste, un repli deterministe la compresse a
+  quelques occurrences puis valide de nouveau le resultat;
+- si le resultat reste invalide, le passage est omis et consigne dans les logs
+  plutot que de contaminer le SRT.
+
+Le seuil de mots par seconde est volontairement permissif et possede une marge
+minimale pour les segments courts. Il sert a detecter une generation impossible,
+pas a imposer une vitesse de lecture ni a supprimer une interjection breve.
+
+Les sorties terminales ne sont pas relancees sur le meme extrait: sur un silence,
+un bruit ou une langue non prise en charge, une seconde generation pourrait
+remplacer un marqueur honnete par une phrase arabe plausible mais inventee.
+
+### Limite Connue: Chant Et Pseudo-arabe
+
+Le controle des scripts elimine une chanson restituee en japonais, et le
+controle du contenu lexical elimine une sortie composee uniquement de notes ou
+de ponctuation. Il ne peut pas reconnaitre une chanson japonaise que le modele
+a deja transformee en mots d'apparence arabe. Un lexique ferme ou un seuil de
+diacritiques produirait aussi des faux positifs sur de l'arabe valide.
+
+La detection de ce pseudo-arabe reste donc un futur travail acoustique:
+detection musique/chant ou VAD specialise, mesure sur un benchmark annote. Elle
+n'est pas simulee par une heuristique textuelle dans cet increment.
 
 ## 7. Construction Du SRT
 
@@ -141,6 +185,14 @@ La sortie de chaque unite devient un sous-titre portant le meme locuteur. Si le
 texte depasse le nombre de mots configure, il est coupe sur la ponctuation ou
 la limite de mots. Les sous-segments se partagent proportionnellement la duree
 de l'unite d'origine et ne peuvent pas franchir sa frontiere de locuteur.
+
+Si cette repartition devait produire un sous-segment plus court que la duree
+minimale configuree, les mots sont reequilibres entre les groupes. Lorsque le nombre
+maximal de mots et la duree minimale sont incompatibles, le texte reste dans un
+bloc plus long plutot que de creer un micro-sous-titre illisible. Cette garantie
+porte sur les sous-segments fabriques pour la lisibilite; un vrai tour acoustique
+tres bref reste conserve et n'est ni etendu ni fusionne au-dela d'une frontiere
+de locuteur.
 
 Cette estimation intra-phrase ne constitue pas un timestamp de mot. Le modele
 Cohere n'en fournit pas; elle sert uniquement a eviter un bloc de texte trop

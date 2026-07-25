@@ -26,7 +26,9 @@ from dual_subtitles.models.subtitle import Segment, SpeakerProfile, SubtitleSegm
 from dual_subtitles.services.diarization import PyannoteDiarizer, SingleSpeakerDiarizer
 from dual_subtitles.services.transcription import (
     SpeechTranscriber,
+    collapse_repeated_token_runs,
     create_transcriber,
+    should_retry_transcript,
     suspicious_transcript_reasons,
 )
 from dual_subtitles.services.translation import InterlinearGoogleTranslator
@@ -301,6 +303,14 @@ def transcribe_phrase_units(
             duration=unit.duration,
         )
         if reasons:
+            if not should_retry_transcript(reasons):
+                LOGGER.warning(
+                    "Discarding unsupported/non-speech ASR output at %.2fs-%.2fs (%s)",
+                    unit.start,
+                    unit.end,
+                    ", ".join(reasons),
+                )
+                continue
             LOGGER.warning(
                 "Suspicious ASR output at %.2fs-%.2fs (%s); retrying",
                 unit.start,
@@ -312,6 +322,7 @@ def transcribe_phrase_units(
                 unit,
                 language=language,
                 retry=True,
+                retry_reasons=reasons,
             )
             retry_reasons = (
                 ("empty",)
@@ -321,7 +332,30 @@ def transcribe_phrase_units(
                     duration=unit.duration,
                 )
             )
-            if retry is None or retry_reasons:
+            if retry is not None and not retry_reasons:
+                result = retry
+            else:
+                fallback = retry if retry is not None else result
+                collapsed_text = collapse_repeated_token_runs(fallback.text)
+                collapsed_reasons = suspicious_transcript_reasons(
+                    collapsed_text,
+                    duration=unit.duration,
+                )
+                if collapsed_text != fallback.text and not collapsed_reasons:
+                    LOGGER.warning(
+                        "Collapsed a pathological repeated-token run at "
+                        "%.2fs-%.2fs after retry",
+                        unit.start,
+                        unit.end,
+                    )
+                    result = SubtitleSegment(
+                        start=fallback.start,
+                        end=fallback.end,
+                        text=collapsed_text,
+                        speaker=fallback.speaker,
+                    )
+                    recognized.append(result)
+                    continue
                 LOGGER.warning(
                     "Discarding invalid ASR output at %.2fs-%.2fs after retry (%s)",
                     unit.start,
@@ -329,7 +363,6 @@ def transcribe_phrase_units(
                     ", ".join(retry_reasons),
                 )
                 continue
-            result = retry
         recognized.append(result)
     return recognized
 
@@ -348,6 +381,7 @@ def prepare_phrase_subtitles(
             split_phrase_subtitle(
                 subtitle,
                 max_words=config.max_words_per_subtitle,
+                min_duration=config.min_speech_duration,
             )
         )
     return add_line_breaks(split, line_break_words=config.line_break_words)
